@@ -1,7 +1,48 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"log"
+	"os"
+
+	"melange-lsp/internal/lsp"
+
+	"go.lsp.dev/jsonrpc2"
+	"go.lsp.dev/protocol"
+)
+
+type stdioReadWriteCloser struct{}
+
+func (stdioReadWriteCloser) Read(p []byte) (int, error) {
+	return os.Stdin.Read(p)
+}
+
+func (stdioReadWriteCloser) Write(p []byte) (int, error) {
+	return os.Stdout.Write(p)
+}
+
+func (stdioReadWriteCloser) Close() error {
+	return nil
+}
 
 func main() {
-	fmt.Println("melange-lsp")
+	// Create LSP server
+	server := lsp.NewServer()
+
+	// Create handler that routes LSP methods to server
+	handler := protocol.ServerHandler(server, jsonrpc2.MethodNotFoundHandler)
+
+	// Create JSON-RPC connection over stdin/stdout
+	ctx := context.Background()
+	stream := jsonrpc2.NewStream(stdioReadWriteCloser{})
+	conn := jsonrpc2.NewConn(stream)
+
+	conn.Go(ctx, handler)
+
+	// Wait for connection to close
+	<-conn.Done()
+
+	if err := conn.Err(); err != nil {
+		log.Fatalf("connection error: %v", err)
+	}
 }
