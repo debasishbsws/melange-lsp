@@ -5,6 +5,7 @@
    --package hspec
    --package text
    --package lsp-types
+   --package data-default
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
@@ -15,12 +16,18 @@ import Test.Hspec
 import Language.LSP.Test
 import Language.LSP.Protocol.Types
 import qualified Data.Text as T
+import Control.Monad.IO.Class (liftIO)
+import Data.Default (def)
+
+-- Minimal capabilities for testing
+minimalCaps :: ClientCapabilities
+minimalCaps = fullCaps
 
 main :: IO ()
 main = hspec $ do
   describe "melange-lsp" $ do
     it "initializes successfully" $ do
-      runSession "../../melange-lsp" fullCaps "." $ do
+      runSessionWithConfig (def { messageTimeout = 5 }) "../../melange-lsp" minimalCaps "." $ do
         doc <- createDoc "test.yaml" "yaml" ""
 
         -- Just check that initialization worked
@@ -41,7 +48,7 @@ main = hspec $ do
             , "    runs: make install"
             ]
 
-      runSession "../../melange-lsp" fullCaps "." $ do
+      runSessionWithConfig (def { messageTimeout = 5 }) "../../melange-lsp" minimalCaps "." $ do
         doc <- createDoc "test.yaml" "yaml" testDoc
         symbols <- getDocumentSymbols doc
 
