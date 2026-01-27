@@ -6,6 +6,7 @@
    --package text
    --package lsp-types
    --package data-default
+   --package lens
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
@@ -23,11 +24,14 @@ import Data.Default (def)
 minimalCaps :: ClientCapabilities
 minimalCaps = fullCaps
 
+serverPath :: String
+serverPath = "/home/justin/src/melange-lsp/melange-lsp"
+
 main :: IO ()
 main = hspec $ do
   describe "melange-lsp" $ do
     it "initializes successfully" $ do
-      runSessionWithConfig (def { messageTimeout = 5 }) "../../melange-lsp" minimalCaps "." $ do
+      runSessionWithConfig (def { messageTimeout = 5 }) serverPath minimalCaps "." $ do
         doc <- createDoc "test.yaml" "yaml" ""
 
         -- Just check that initialization worked
@@ -48,9 +52,23 @@ main = hspec $ do
             , "    runs: make install"
             ]
 
-      runSessionWithConfig (def { messageTimeout = 5 }) "../../melange-lsp" minimalCaps "." $ do
+      runSessionWithConfig (def { messageTimeout = 5 }) serverPath minimalCaps "." $ do
         doc <- createDoc "test.yaml" "yaml" testDoc
         symbols <- getDocumentSymbols doc
 
         -- Check we got some symbols back
         liftIO $ symbols `shouldSatisfy` (not . null)
+
+    it "reports diagnostics for invalid YAML" $ do
+      let invalidDoc = T.unlines
+            [ "package:"
+            , "  name: test-package"
+            , "  -- missing version and epoch"
+            ]
+
+      runSessionWithConfig (def { messageTimeout = 5 }) serverPath minimalCaps "." $ do
+        _ <- createDoc "invalid.yaml" "yaml" invalidDoc
+        diags <- waitForDiagnostics
+
+        -- Should get at least one diagnostic
+        liftIO $ diags `shouldSatisfy` (not . null)
