@@ -29,13 +29,17 @@ func main() {
 	// Create LSP server
 	server := lsp.NewServer()
 
-	// Create handler that routes LSP methods to server
-	handler := protocol.ServerHandler(server, jsonrpc2.MethodNotFoundHandler)
-
 	// Create JSON-RPC connection over stdin/stdout
 	ctx := context.Background()
 	stream := jsonrpc2.NewStream(stdioReadWriteCloser{})
 	conn := jsonrpc2.NewConn(stream)
+
+	// Create client from connection and set it on server
+	client := protocol.ClientDispatcher(conn, nil)
+	server.SetClient(client)
+
+	// Create handler that routes LSP methods to server
+	handler := protocol.ServerHandler(server, jsonrpc2.MethodNotFoundHandler)
 
 	conn.Go(ctx, handler)
 

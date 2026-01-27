@@ -13,6 +13,9 @@ type Server struct {
 
 	// documents tracks open documents by URI
 	documents map[protocol.DocumentURI]*Document
+
+	// client is used to send notifications to the LSP client
+	client protocol.Client
 }
 
 // Document represents an open melange configuration file.
@@ -64,13 +67,16 @@ func (s *Server) Exit(ctx context.Context) error {
 // DidOpen handles the textDocument/didOpen notification.
 func (s *Server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocumentParams) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.documents[params.TextDocument.URI] = &Document{
 		URI:     params.TextDocument.URI,
 		Content: params.TextDocument.Text,
 		Version: params.TextDocument.Version,
 	}
+	s.mu.Unlock()
+
+	// Validate and publish diagnostics
+	diagnostics := ValidateDocument(params.TextDocument.URI, params.TextDocument.Text)
+	s.publishDiagnostics(ctx, params.TextDocument.URI, diagnostics)
 
 	return nil
 }
@@ -78,10 +84,9 @@ func (s *Server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocume
 // DidChange handles the textDocument/didChange notification.
 func (s *Server) DidChange(ctx context.Context, params *protocol.DidChangeTextDocumentParams) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	doc, exists := s.documents[params.TextDocument.URI]
 	if !exists {
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -90,6 +95,11 @@ func (s *Server) DidChange(ctx context.Context, params *protocol.DidChangeTextDo
 		doc.Content = params.ContentChanges[0].Text
 		doc.Version = params.TextDocument.Version
 	}
+	s.mu.Unlock()
+
+	// Validate and publish diagnostics
+	diagnostics := ValidateDocument(params.TextDocument.URI, doc.Content)
+	s.publishDiagnostics(ctx, params.TextDocument.URI, diagnostics)
 
 	return nil
 }
@@ -97,9 +107,11 @@ func (s *Server) DidChange(ctx context.Context, params *protocol.DidChangeTextDo
 // DidClose handles the textDocument/didClose notification.
 func (s *Server) DidClose(ctx context.Context, params *protocol.DidCloseTextDocumentParams) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	delete(s.documents, params.TextDocument.URI)
+	s.mu.Unlock()
+
+	// Clear diagnostics when document closes
+	s.publishDiagnostics(ctx, params.TextDocument.URI, []protocol.Diagnostic{})
 
 	return nil
 }
@@ -117,4 +129,27 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 	// Parse the document and return symbols
 	symbols := parseDocumentSymbols(doc.Content)
 	return symbols, nil
+}
+
+// SetClient sets the LSP client for sending notifications.
+func (s *Server) SetClient(client protocol.Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.client = client
+}
+
+// publishDiagnostics sends diagnostics for a document to the client.
+func (s *Server) publishDiagnostics(ctx context.Context, uri protocol.DocumentURI, diagnostics []protocol.Diagnostic) {
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+
+	if client == nil {
+		return
+	}
+
+	client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
+		URI:         uri,
+		Diagnostics: diagnostics,
+	})
 }
