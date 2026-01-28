@@ -9,6 +9,7 @@ import (
 
 	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
+	"go.uber.org/zap"
 )
 
 type stdioReadWriteCloser struct{}
@@ -35,7 +36,7 @@ func main() {
 	conn := jsonrpc2.NewConn(stream)
 
 	// Create client from connection and set it on server
-	client := protocol.ClientDispatcher(conn, nil)
+	client := protocol.ClientDispatcher(conn, zap.NewNop())
 	server.SetClient(client)
 
 	// Create handler that routes LSP methods to server
