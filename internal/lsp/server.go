@@ -41,6 +41,9 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 				Change:    protocol.TextDocumentSyncKindFull,
 			},
 			DocumentSymbolProvider: true,
+			CompletionProvider: &protocol.CompletionOptions{
+				TriggerCharacters: []string{"\n", " ", ":"},
+			},
 		},
 		ServerInfo: &protocol.ServerInfo{
 			Name:    "melange-lsp",
@@ -129,6 +132,24 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 	// Parse the document and return symbols
 	symbols := parseDocumentSymbols(doc.Content)
 	return symbols, nil
+}
+
+// Completion handles the textDocument/completion request.
+func (s *Server) Completion(ctx context.Context, params *protocol.CompletionParams) (*protocol.CompletionList, error) {
+	s.mu.Lock()
+	doc, exists := s.documents[params.TextDocument.URI]
+	s.mu.Unlock()
+
+	if !exists {
+		return &protocol.CompletionList{Items: []protocol.CompletionItem{}}, nil
+	}
+
+	items := getCompletions(doc.Content, params.Position)
+
+	return &protocol.CompletionList{
+		IsIncomplete: false,
+		Items:        items,
+	}, nil
 }
 
 // SetClient sets the LSP client for sending notifications.

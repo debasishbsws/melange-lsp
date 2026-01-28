@@ -24,10 +24,6 @@ func (s *Server) ColorPresentation(ctx context.Context, params *protocol.ColorPr
 	return nil, nil
 }
 
-func (s *Server) Completion(ctx context.Context, params *protocol.CompletionParams) (*protocol.CompletionList, error) {
-	return nil, nil
-}
-
 func (s *Server) Declaration(ctx context.Context, params *protocol.DeclarationParams) ([]protocol.Location, error) {
 	return nil, nil
 }
