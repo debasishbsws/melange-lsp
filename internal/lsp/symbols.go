@@ -8,13 +8,13 @@ import (
 
 // parseDocumentSymbols parses the document content and returns symbols for the outline view.
 func parseDocumentSymbols(content string) []interface{} {
+	symbols := []interface{}{}
+
 	config, err := parser.Parse(content)
 	if err != nil {
 		// If parsing fails, return empty symbols
-		return nil
+		return symbols
 	}
-
-	var symbols []interface{}
 
 	// Add package symbol
 	if config.Package.Name != "" {

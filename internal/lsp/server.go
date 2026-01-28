@@ -123,7 +123,7 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 	s.mu.Unlock()
 
 	if !exists {
-		return nil, nil
+		return []interface{}{}, nil
 	}
 
 	// Parse the document and return symbols

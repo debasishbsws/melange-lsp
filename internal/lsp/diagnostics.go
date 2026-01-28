@@ -13,7 +13,9 @@ import (
 )
 
 // ValidateDocument validates a melange YAML document and returns diagnostics.
-func ValidateDocument(uri protocol.DocumentURI, content string) (diagnostics []protocol.Diagnostic) {
+func ValidateDocument(uri protocol.DocumentURI, content string) []protocol.Diagnostic {
+	diagnostics := []protocol.Diagnostic{}
+
 	// Recover from any panics that melange might throw
 	defer func() {
 		if r := recover(); r != nil {
