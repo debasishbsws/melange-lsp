@@ -72,3 +72,18 @@ main = hspec $ do
 
         -- Should get at least one diagnostic
         liftIO $ diags `shouldSatisfy` (not . null)
+
+    it "provides completions for package fields" $ do
+      let testDoc = T.unlines
+            [ "package:"
+            , "  "
+            ]
+
+      runSessionWithConfig (def { messageTimeout = 5 }) serverPath minimalCaps "." $ do
+        doc <- createDoc "completion.yaml" "yaml" testDoc
+        -- Position at line 1 (0-indexed), character 2 (after the indentation)
+        completions <- getCompletions doc (Position 1 2)
+
+        -- Should get package field completions (name, version, epoch, etc.)
+        -- Package has many fields, we should get several completions
+        liftIO $ length completions `shouldSatisfy` (> 5)
