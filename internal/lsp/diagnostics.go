@@ -6,11 +6,44 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 
 	"chainguard.dev/melange/pkg/config"
 	"github.com/psanford/memfs"
 	"go.lsp.dev/protocol"
 )
+
+var linePattern = regexp.MustCompile(`line (\d+)`)
+
+// parseLineFromError extracts a 0-indexed line number from an error message.
+// Melange/YAML errors embed 1-indexed line numbers like "yaml: line 5: ...".
+// Returns 0 if no line number is found.
+func parseLineFromError(errMsg string) uint32 {
+	m := linePattern.FindStringSubmatch(errMsg)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(m[1], 10, 32)
+	if err != nil || n == 0 {
+		return 0
+	}
+	return uint32(n - 1) // convert to 0-indexed
+}
+
+// diagnosticForError creates a diagnostic highlighting the full line extracted from the error message.
+func diagnosticForError(source string, err error) protocol.Diagnostic {
+	line := parseLineFromError(err.Error())
+	return protocol.Diagnostic{
+		Range: protocol.Range{
+			Start: protocol.Position{Line: line, Character: 0},
+			End:   protocol.Position{Line: line, Character: 1000},
+		},
+		Severity: protocol.DiagnosticSeverityError,
+		Source:   source,
+		Message:  err.Error(),
+	}
+}
 
 // ValidateDocument validates a melange YAML document and returns diagnostics.
 func ValidateDocument(uri protocol.DocumentURI, content string) []protocol.Diagnostic {
@@ -61,16 +94,7 @@ func ValidateDocument(uri protocol.DocumentURI, content string) []protocol.Diagn
 
 	if err != nil {
 		log.Printf("melange-lsp: validation error: %v", err)
-		// Convert melange error to LSP diagnostic
-		diagnostics = append(diagnostics, protocol.Diagnostic{
-			Range: protocol.Range{
-				Start: protocol.Position{Line: 0, Character: 0},
-				End:   protocol.Position{Line: 0, Character: 0},
-			},
-			Severity: protocol.DiagnosticSeverityError,
-			Source:   "melange",
-			Message:  err.Error(),
-		})
+		diagnostics = append(diagnostics, diagnosticForError("melange", err))
 	} else {
 		log.Printf("melange-lsp: validation successful")
 	}
@@ -104,16 +128,7 @@ func ValidateDocumentFromFile(uri protocol.DocumentURI) []protocol.Diagnostic {
 	_, err = config.ParseConfiguration(ctx, absPath)
 
 	if err != nil {
-		// Convert melange error to LSP diagnostic
-		diagnostics = append(diagnostics, protocol.Diagnostic{
-			Range: protocol.Range{
-				Start: protocol.Position{Line: 0, Character: 0},
-				End:   protocol.Position{Line: 0, Character: 0},
-			},
-			Severity: protocol.DiagnosticSeverityError,
-			Source:   "melange",
-			Message:  err.Error(),
-		})
+		diagnostics = append(diagnostics, diagnosticForError("melange", err))
 	}
 
 	return diagnostics
