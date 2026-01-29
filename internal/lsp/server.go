@@ -2,7 +2,12 @@ package lsp
 
 import (
 	"context"
+	"encoding/json"
+	"net/url"
+	"path/filepath"
 	"sync"
+
+	"melange-lsp/internal/pipeline"
 
 	"go.lsp.dev/protocol"
 )
@@ -16,6 +21,9 @@ type Server struct {
 
 	// client is used to send notifications to the LSP client
 	client protocol.Client
+
+	// registry provides pipeline discovery for completions
+	registry *pipeline.Registry
 }
 
 // Document represents an open melange configuration file.
@@ -32,8 +40,40 @@ func NewServer() *Server {
 	}
 }
 
+// initOptions holds LSP initialization options for the melange LSP server.
+type initOptions struct {
+	PipelineDirs []string `json:"pipelineDirs,omitempty"`
+}
+
 // Initialize handles the initialize request from the client.
 func (s *Server) Initialize(ctx context.Context, params *protocol.InitializeParams) (*protocol.InitializeResult, error) {
+	// Parse pipeline directories from initializationOptions
+	var opts initOptions
+	if params.InitializationOptions != nil {
+		data, err := json.Marshal(params.InitializationOptions)
+		if err == nil {
+			json.Unmarshal(data, &opts)
+		}
+	}
+
+	// Determine pipeline dirs: use configured or default to pipelines/ relative to root
+	pipelineDirs := opts.PipelineDirs
+	if len(pipelineDirs) == 0 {
+		rootDir := ""
+		if params.RootURI != "" {
+			if u, err := url.Parse(string(params.RootURI)); err == nil && u.Path != "" {
+				rootDir = u.Path
+			}
+		}
+		if rootDir != "" {
+			pipelineDirs = []string{filepath.Join(rootDir, "pipelines")}
+		}
+	}
+
+	s.mu.Lock()
+	s.registry = pipeline.NewRegistry(pipelineDirs)
+	s.mu.Unlock()
+
 	return &protocol.InitializeResult{
 		Capabilities: protocol.ServerCapabilities{
 			TextDocumentSync: protocol.TextDocumentSyncOptions{
@@ -144,7 +184,7 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 		return &protocol.CompletionList{Items: []protocol.CompletionItem{}}, nil
 	}
 
-	items := getCompletions(doc.Content, params.Position)
+	items := getCompletions(doc.Content, params.Position, s.registry)
 
 	return &protocol.CompletionList{
 		IsIncomplete: false,
