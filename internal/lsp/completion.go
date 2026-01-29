@@ -51,7 +51,7 @@ func getCompletions(content string, position protocol.Position, registry *pipeli
 // getPipelineCompletions returns completions for uses: values and with: keys,
 // or nil if the cursor is not in a pipeline-specific context.
 func getPipelineCompletions(lines []string, line int, path []string, registry *pipeline.Registry) []protocol.CompletionItem {
-	if len(path) < 2 || path[0] != "pipeline" {
+	if !pathContainsPipeline(path) {
 		return nil
 	}
 
@@ -147,6 +147,17 @@ func findSiblingUses(lines []string, line int) string {
 	}
 
 	return ""
+}
+
+// pathContainsPipeline reports whether the YAML path includes a "pipeline" key,
+// covering both top-level pipeline and subpackage pipeline contexts.
+func pathContainsPipeline(path []string) bool {
+	for _, p := range path {
+		if p == "pipeline" {
+			return true
+		}
+	}
+	return false
 }
 
 // pipelineInputsToCompletions converts pipeline inputs to completion items.
