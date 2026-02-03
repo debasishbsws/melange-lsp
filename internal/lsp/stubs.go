@@ -60,10 +60,6 @@ func (s *Server) Formatting(ctx context.Context, params *protocol.DocumentFormat
 	return nil, nil
 }
 
-func (s *Server) Hover(ctx context.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
-	return nil, nil
-}
-
 func (s *Server) Implementation(ctx context.Context, params *protocol.ImplementationParams) ([]protocol.Location, error) {
 	return nil, nil
 }

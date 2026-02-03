@@ -80,6 +80,7 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 				OpenClose: true,
 				Change:    protocol.TextDocumentSyncKindFull,
 			},
+			HoverProvider:          true,
 			DocumentSymbolProvider: true,
 			CompletionProvider: &protocol.CompletionOptions{
 				TriggerCharacters: []string{"\n", " ", ":"},
@@ -190,6 +191,19 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 		IsIncomplete: false,
 		Items:        items,
 	}, nil
+}
+
+// Hover handles the textDocument/hover request.
+func (s *Server) Hover(ctx context.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
+	s.mu.Lock()
+	doc, exists := s.documents[params.TextDocument.URI]
+	s.mu.Unlock()
+
+	if !exists {
+		return nil, nil
+	}
+
+	return getHover(doc.Content, params.Position), nil
 }
 
 // SetClient sets the LSP client for sending notifications.
