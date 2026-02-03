@@ -14,6 +14,8 @@ type MelangeConfig struct {
 	Environment map[string]interface{} `yaml:"environment"`
 	Pipeline    []PipelineStep         `yaml:"pipeline"`
 	Subpackages []Subpackage           `yaml:"subpackages"`
+	Vars        map[string]string      `yaml:"vars"`
+	Data        []RangeData            `yaml:"data"`
 }
 
 // PipelineStep represents a step in the pipeline.
@@ -23,9 +25,16 @@ type PipelineStep struct {
 	Runs string `yaml:"runs"`
 }
 
+// RangeData represents a named data source used with range: directives.
+type RangeData struct {
+	Name  string            `yaml:"name"`
+	Items map[string]string `yaml:"items"`
+}
+
 // Subpackage represents a subpackage definition.
 type Subpackage struct {
-	Name string `yaml:"name"`
+	Name  string `yaml:"name"`
+	Range string `yaml:"range"`
 }
 
 // Parse parses a melange YAML configuration.
