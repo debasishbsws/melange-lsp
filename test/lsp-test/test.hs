@@ -25,7 +25,7 @@ minimalCaps :: ClientCapabilities
 minimalCaps = fullCaps
 
 serverPath :: String
-serverPath = "/home/justin/src/melange-lsp/melange-lsp"
+serverPath = "../../melange-lsp"
 
 main :: IO ()
 main = hspec $ do
@@ -87,3 +87,16 @@ main = hspec $ do
         -- Should get package field completions (name, version, epoch, etc.)
         -- Package has many fields, we should get several completions
         liftIO $ length completions `shouldSatisfy` (> 5)
+
+    it "provides hover for ${{...}} expressions" $ do
+      let testDoc = T.unlines
+            [ "vars:"
+            , "  foo: bar-value"
+            , "pipeline:"
+            , "  - runs: echo ${{vars.foo}}"
+            ]
+      runSessionWithConfig (def { messageTimeout = 5 }) serverPath minimalCaps "." $ do
+        doc <- createDoc "hover.yaml" "yaml" testDoc
+        -- Position on "vars.foo" inside ${{...}} at line 3, around column 22
+        hover <- getHover doc (Position 3 22)
+        liftIO $ hover `shouldSatisfy` (/= Nothing)
