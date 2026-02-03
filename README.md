@@ -31,4 +31,15 @@ make test   # Run tests
 
 ## Status
 
-Early development - basic project structure only.
+Early development. See `docs/PLAN.md` for the phased roadmap.
+
+Current capabilities:
+- Document synchronization (open/change/close)
+- Diagnostics via melange parser validation
+- Completions for melange config keys and pipeline names
+- Document symbols (package, pipeline steps, subpackages)
+- Hover for `${{...}}` variable expressions (built-ins, user vars, range vars)
+
+## Development History
+
+This project has been developed entirely by LLMs, primarily [Claude](https://claude.ai) (Anthropic) with contributions from Qwen and others. Human involvement has been limited to direction, review, and testing.
