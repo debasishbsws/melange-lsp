@@ -10,7 +10,7 @@ import (
 )
 
 // getCompletions returns completions for the given document and position.
-func getCompletions(content string, position protocol.Position, registry *pipeline.Registry) []protocol.CompletionItem {
+func getCompletions(content string, position protocol.Position, registry *pipeline.Registry, dirs []string) []protocol.CompletionItem {
 	lines := strings.Split(content, "\n")
 	line := int(position.Line)
 
@@ -19,7 +19,7 @@ func getCompletions(content string, position protocol.Position, registry *pipeli
 
 	// Check for pipeline-specific completions
 	if registry != nil {
-		if items := getPipelineCompletions(lines, line, path, registry); items != nil {
+		if items := getPipelineCompletions(lines, line, path, registry, dirs); items != nil {
 			return items
 		}
 	}
@@ -50,7 +50,7 @@ func getCompletions(content string, position protocol.Position, registry *pipeli
 
 // getPipelineCompletions returns completions for uses: values and with: keys,
 // or nil if the cursor is not in a pipeline-specific context.
-func getPipelineCompletions(lines []string, line int, path []string, registry *pipeline.Registry) []protocol.CompletionItem {
+func getPipelineCompletions(lines []string, line int, path []string, registry *pipeline.Registry, dirs []string) []protocol.CompletionItem {
 	if !pathContainsPipeline(path) {
 		return nil
 	}
@@ -63,7 +63,7 @@ func getPipelineCompletions(lines []string, line int, path []string, registry *p
 
 	// uses: value completion — path is ["pipeline", "0"] and line has "uses:"
 	if strings.HasPrefix(currentLine, "uses:") || strings.HasPrefix(currentLine, "- uses:") {
-		names := registry.ListPipelines()
+		names := registry.ListPipelines(dirs)
 		var items []protocol.CompletionItem
 		for _, name := range names {
 			items = append(items, protocol.CompletionItem{
@@ -82,7 +82,7 @@ func getPipelineCompletions(lines []string, line int, path []string, registry *p
 		if usesValue == "" {
 			return nil
 		}
-		info, err := registry.LoadPipeline(usesValue)
+		info, err := registry.LoadPipeline(usesValue, dirs)
 		if err != nil {
 			return nil
 		}

@@ -29,7 +29,17 @@ func (s *Server) Declaration(ctx context.Context, params *protocol.DeclarationPa
 }
 
 func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionParams) ([]protocol.Location, error) {
-	return nil, nil
+	s.mu.Lock()
+	doc, exists := s.documents[params.TextDocument.URI]
+	s.mu.Unlock()
+
+	if !exists {
+		return nil, nil
+	}
+
+	dirs := pipelineDirsForURI(params.TextDocument.URI)
+	locs := getDefinition(doc.Content, params.Position, s.registry, dirs)
+	return locs, nil
 }
 
 func (s *Server) DidSave(ctx context.Context, params *protocol.DidSaveTextDocumentParams) error {

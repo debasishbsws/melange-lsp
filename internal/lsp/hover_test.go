@@ -13,7 +13,7 @@ func TestHoverBuiltinVar(t *testing.T) {
 `
 	// Cursor on "package.version" inside ${{...}}
 	pos := protocol.Position{Line: 2, Character: 16}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -33,7 +33,7 @@ pipeline:
 `
 	// Cursor on "package.name" inside ${{...}}
 	pos := protocol.Position{Line: 6, Character: 20}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -62,7 +62,7 @@ pipeline:
 `
 	// Cursor on "vars.mangled-ver"
 	pos := protocol.Position{Line: 11, Character: 20}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -82,7 +82,7 @@ pipeline:
 `
 	// Cursor on "vars.foo"
 	pos := protocol.Position{Line: 4, Character: 22}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -100,7 +100,7 @@ pipeline:
 `
 	// Cursor on "vars.foo" inside ${{...}}
 	pos := protocol.Position{Line: 3, Character: 22}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -121,7 +121,7 @@ subpackages:
 `
 	// Cursor on "range.key" inside ${{...}}
 	pos := protocol.Position{Line: 7, Character: 14}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -142,7 +142,7 @@ subpackages:
 `
 	// Cursor on "name" key at the subpackage level (line 4)
 	pos := protocol.Position{Line: 4, Character: 6}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -169,7 +169,7 @@ subpackages:
 `
 	// Cursor on "name" key inside range subpackage (line 10)
 	pos := protocol.Position{Line: 10, Character: 6}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -195,7 +195,7 @@ pipeline:
 `
 	// Cursor on "runs" key (line 4)
 	pos := protocol.Position{Line: 4, Character: 6}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -227,7 +227,7 @@ subpackages:
 `
 	// Cursor on "runs" key (line 12)
 	pos := protocol.Position{Line: 12, Character: 8}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -246,7 +246,7 @@ func TestHoverKeyLiteralValue(t *testing.T) {
 `
 	// Cursor on "name" key with a plain literal value — should return nil
 	pos := protocol.Position{Line: 1, Character: 4}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover != nil {
 		t.Errorf("expected nil hover for literal value key, got: %+v", hover)
 	}
@@ -264,7 +264,7 @@ subpackages:
 	// Line 4: "  - name: ${{package.name}}-dev"
 	// Position just after the closing }} on the "-dev" part (char ~30)
 	pos := protocol.Position{Line: 4, Character: 30}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -285,7 +285,7 @@ environment:
 	// Cursor on bare list item "- ${{package.name}}-dev" (line 6)
 	// Place cursor past the ${{}} span, on the "-dev" suffix
 	pos := protocol.Position{Line: 6, Character: 28}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -312,7 +312,7 @@ subpackages:
 `
 	// Cursor on bare list item with range (line 13), on "lib-" prefix before ${{
 	pos := protocol.Position{Line: 13, Character: 10}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover == nil {
 		t.Fatal("expected hover result, got nil")
 	}
@@ -335,7 +335,7 @@ environment:
 `
 	// Cursor on bare list item with no templates — should return nil
 	pos := protocol.Position{Line: 6, Character: 10}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover != nil {
 		t.Errorf("expected nil hover for literal list item, got: %+v", hover)
 	}
@@ -346,7 +346,7 @@ func TestHoverNoVariable(t *testing.T) {
   name: test
 `
 	pos := protocol.Position{Line: 1, Character: 5}
-	hover := getHover(content, pos)
+	hover := getHover(content, pos, nil, nil)
 	if hover != nil {
 		t.Errorf("expected nil hover when not on a variable, got: %+v", hover)
 	}

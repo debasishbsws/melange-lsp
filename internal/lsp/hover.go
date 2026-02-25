@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"melange-lsp/internal/parser"
+	"melange-lsp/internal/pipeline"
 
 	"chainguard.dev/melange/pkg/config"
 	"github.com/psanford/memfs"
@@ -42,8 +43,9 @@ var builtinVarDescriptions = map[string]string{
 }
 
 // getHover returns hover information for the given document content and position.
-// It provides info when the cursor is on a ${{...}} expression.
-func getHover(content string, position protocol.Position) *protocol.Hover {
+// It provides info when the cursor is on a ${{...}} expression, a pipeline
+// with: key, or a YAML key/value containing template expressions.
+func getHover(content string, position protocol.Position, registry *pipeline.Registry, dirs []string) *protocol.Hover {
 	lines := strings.Split(content, "\n")
 	lineIdx := int(position.Line)
 	if lineIdx >= len(lines) {
@@ -54,6 +56,26 @@ func getHover(content string, position protocol.Position) *protocol.Hover {
 	col := int(position.Character)
 	if col > len(line) {
 		col = len(line)
+	}
+
+	// Check for pipeline-specific hovers before template resolution
+	if registry != nil {
+		if markdown := getUsesHover(line, registry, dirs); markdown != "" {
+			return &protocol.Hover{
+				Contents: protocol.MarkupContent{
+					Kind:  protocol.Markdown,
+					Value: markdown,
+				},
+			}
+		}
+		if markdown := getPipelineInputHover(line, col, lines, lineIdx, registry, dirs); markdown != "" {
+			return &protocol.Hover{
+				Contents: protocol.MarkupContent{
+					Kind:  protocol.Markdown,
+					Value: markdown,
+				},
+			}
+		}
 	}
 
 	// Build substitution map from melange's parser for resolved values
@@ -95,6 +117,137 @@ func getHover(content string, position protocol.Position) *protocol.Hover {
 			Value: markdown,
 		},
 	}
+}
+
+// getUsesHover returns hover documentation when the cursor is on a uses: line
+// in a pipeline step. It loads the pipeline definition and shows the name,
+// inputs summary, and runs script.
+func getUsesHover(line string, registry *pipeline.Registry, dirs []string) string {
+	stripped := strings.TrimSpace(line)
+	if strings.HasPrefix(stripped, "- ") {
+		stripped = stripped[2:]
+	}
+	if !strings.HasPrefix(stripped, "uses:") {
+		return ""
+	}
+
+	usesValue := strings.TrimSpace(strings.TrimPrefix(stripped, "uses:"))
+	if usesValue == "" {
+		return ""
+	}
+
+	info, err := registry.LoadPipeline(usesValue, dirs)
+	if err != nil {
+		return ""
+	}
+
+	header := fmt.Sprintf("**`%s`**", usesValue)
+	if info.Name != "" {
+		header = fmt.Sprintf("**%s** (`%s`)", info.Name, usesValue)
+	}
+
+	raw := strings.TrimSpace(info.Raw)
+	if raw == "" {
+		return header
+	}
+
+	return header + "\n\n```yaml\n" + raw + "\n```"
+}
+
+// getPipelineInputHover returns hover documentation for a with: key in a
+// pipeline step. It detects if the cursor is on a key inside a with: block,
+// looks up the sibling uses: value, loads the pipeline, and returns the input's
+// description, required/optional status, and default value.
+func getPipelineInputHover(line string, col int, lines []string, lineIdx int, registry *pipeline.Registry, dirs []string) string {
+	// Check if this line looks like a key: value inside a with: block
+	stripped := strings.TrimLeft(line, " \t")
+	if stripped == "" || strings.HasPrefix(stripped, "#") {
+		return ""
+	}
+
+	// Strip list prefix if present
+	work := stripped
+	if strings.HasPrefix(work, "- ") {
+		work = work[2:]
+	}
+
+	colonIdx := strings.Index(work, ":")
+	if colonIdx <= 0 {
+		return ""
+	}
+
+	keyName := work[:colonIdx]
+
+	// Cursor must be on the key portion
+	origKeyStart := strings.Index(line, keyName)
+	origColonPos := origKeyStart + len(keyName)
+	if col > origColonPos {
+		return ""
+	}
+
+	// Check if we're inside a with: block by walking backwards
+	lineIndent := getIndentation(line)
+	inWithBlock := false
+	for i := lineIdx - 1; i >= 0; i-- {
+		l := lines[i]
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := getIndentation(l)
+		if indent < lineIndent {
+			// This is a parent — check if it's "with:"
+			parentKey := strings.TrimSpace(l)
+			if strings.HasPrefix(parentKey, "- ") {
+				parentKey = parentKey[2:]
+			}
+			if strings.HasPrefix(parentKey, "with:") {
+				inWithBlock = true
+			}
+			break
+		}
+		if indent == lineIndent {
+			// Sibling line, keep looking
+			continue
+		}
+	}
+
+	if !inWithBlock {
+		return ""
+	}
+
+	// Find the sibling uses: value
+	usesValue := findSiblingUses(lines, lineIdx)
+	if usesValue == "" {
+		return ""
+	}
+
+	info, err := registry.LoadPipeline(usesValue, dirs)
+	if err != nil {
+		return ""
+	}
+
+	input, ok := info.Inputs[keyName]
+	if !ok {
+		return ""
+	}
+
+	// Build markdown documentation
+	var parts []string
+	parts = append(parts, fmt.Sprintf("**`%s`** — %s pipeline input", keyName, usesValue))
+	if input.Description != "" {
+		parts = append(parts, input.Description)
+	}
+	if input.Required {
+		parts = append(parts, "*Required*")
+	} else {
+		parts = append(parts, "*Optional*")
+	}
+	if input.Default != "" {
+		parts = append(parts, fmt.Sprintf("Default: `%s`", input.Default))
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // findExpressionAt finds a ${{...}} expression at the given column in a line.
