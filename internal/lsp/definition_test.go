@@ -180,17 +180,38 @@ func TestDefinitionWithKeyOutput(t *testing.T) {
 	}
 }
 
-func TestDefinitionOutsidePipeline(t *testing.T) {
+func TestDefinitionSchemaFallback(t *testing.T) {
 	registry, dirs, _ := setupTestRegistry(t)
 
 	content := `package:
   name: test
   version: 1.0.0
 `
+	// Cursor on "name" key under package — should jump to schema.json
 	pos := protocol.Position{Line: 1, Character: 4}
 	locs := getDefinition(content, pos, registry, dirs)
-	if len(locs) != 0 {
-		t.Errorf("expected no definition outside pipeline, got %d", len(locs))
+	if len(locs) == 0 {
+		t.Fatal("expected schema definition for 'name' under package, got none")
+	}
+	if !strings.Contains(string(locs[0].URI), "schema.json") {
+		t.Errorf("expected schema.json URI, got %q", locs[0].URI)
+	}
+}
+
+func TestDefinitionSchemaTopLevel(t *testing.T) {
+	content := `package:
+  name: test
+pipeline:
+  - runs: echo hi
+`
+	// Cursor on "package:" at top level — should jump to schema.json
+	pos := protocol.Position{Line: 0, Character: 2}
+	locs := getDefinition(content, pos, nil, nil)
+	if len(locs) == 0 {
+		t.Fatal("expected schema definition for top-level 'package', got none")
+	}
+	if !strings.Contains(string(locs[0].URI), "schema.json") {
+		t.Errorf("expected schema.json URI, got %q", locs[0].URI)
 	}
 }
 
@@ -198,10 +219,16 @@ func TestDefinitionNilRegistry(t *testing.T) {
 	content := `pipeline:
   - uses: go/build
 `
-	pos := protocol.Position{Line: 1, Character: 12}
+	// Cursor on "uses:" value — with nil registry, pipeline definition won't work
+	// but schema fallback should fire since cursor is on the "uses" key
+	pos := protocol.Position{Line: 1, Character: 6}
 	locs := getDefinition(content, pos, nil, nil)
-	if len(locs) != 0 {
-		t.Errorf("expected no definition with nil registry, got %d", len(locs))
+	// "uses" is a property of Pipeline, so schema fallback should work
+	if len(locs) == 0 {
+		t.Fatal("expected schema fallback for 'uses' key with nil registry, got none")
+	}
+	if !strings.Contains(string(locs[0].URI), "schema.json") {
+		t.Errorf("expected schema.json URI, got %q", locs[0].URI)
 	}
 }
 

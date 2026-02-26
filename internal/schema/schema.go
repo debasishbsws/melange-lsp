@@ -3,7 +3,10 @@ package schema
 import (
 	_ "embed"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
 //go:embed schema.json
@@ -42,10 +45,160 @@ type jsonSchemaItemRef struct {
 
 var parsed jsonSchema
 
+// lineIndex maps "DefinitionName.propertyName" to a 0-based line number in schema.json.
+var lineIndex map[string]int
+
 func init() {
 	if err := json.Unmarshal(schemaJSON, &parsed); err != nil {
 		panic("schema: failed to parse embedded schema.json: " + err.Error())
 	}
+	lineIndex = buildLineIndex()
+}
+
+// buildLineIndex scans the raw schema.json text to map each property to its
+// line number. It looks for patterns like `"propName": {` within `"DefName": {`
+// → `"properties": {` blocks.
+func buildLineIndex() map[string]int {
+	idx := make(map[string]int)
+	lines := strings.Split(string(schemaJSON), "\n")
+
+	var currentDef string
+	inProperties := false
+	braceDepth := 0
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Track definition names: top-level keys inside $defs
+		// Pattern: "DefinitionName": {
+		if currentDef == "" && strings.HasSuffix(trimmed, ": {") {
+			name := strings.Trim(strings.TrimSuffix(trimmed, ": {"), "\"")
+			if name != "$schema" && name != "$id" && name != "$ref" && name != "$defs" {
+				currentDef = name
+				braceDepth = 1
+				inProperties = false
+				continue
+			}
+		}
+
+		if currentDef == "" {
+			continue
+		}
+
+		// Count braces to know when we leave the definition
+		for _, ch := range trimmed {
+			if ch == '{' {
+				braceDepth++
+			} else if ch == '}' {
+				braceDepth--
+			}
+		}
+
+		if braceDepth <= 0 {
+			currentDef = ""
+			inProperties = false
+			continue
+		}
+
+		// Detect "properties": {
+		if !inProperties && (trimmed == "\"properties\": {") {
+			inProperties = true
+			continue
+		}
+
+		// Inside properties, look for property keys at the right depth
+		if inProperties && braceDepth == 3 {
+			// Pattern: "propertyName": { or "propertyName": "..."
+			if colonIdx := strings.Index(trimmed, "\": "); colonIdx > 0 && strings.HasPrefix(trimmed, "\"") {
+				propName := trimmed[1:colonIdx]
+				idx[currentDef+"."+propName] = i
+			}
+		}
+	}
+
+	return idx
+}
+
+var (
+	schemaFileOnce sync.Once
+	schemaFilePath string
+)
+
+// SchemaFilePath returns the on-disk path to schema.json, writing the embedded
+// content to a cache directory if needed. This allows go-to-definition to open
+// the file in the editor.
+func SchemaFilePath() string {
+	schemaFileOnce.Do(func() {
+		dir := filepath.Join(os.TempDir(), "melange-lsp")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return
+		}
+		p := filepath.Join(dir, "schema.json")
+		if err := os.WriteFile(p, schemaJSON, 0o644); err != nil {
+			return
+		}
+		schemaFilePath = p
+	})
+	return schemaFilePath
+}
+
+// FindPropertyLine resolves a YAML path and key name to a 0-based line number
+// in schema.json. Returns -1 if the property cannot be found.
+func FindPropertyLine(path []string, key string) int {
+	// Resolve the path to a definition name.
+	defName := resolvePathToDefinition(path)
+	if defName == "" {
+		return -1
+	}
+
+	line, ok := lineIndex[defName+"."+key]
+	if !ok {
+		return -1
+	}
+	return line
+}
+
+// resolvePathToDefinition walks the YAML path and returns the schema definition
+// name that contains the properties at that level.
+func resolvePathToDefinition(path []string) string {
+	defName := "Configuration"
+	def, ok := parsed.Defs[defName]
+	if !ok {
+		return ""
+	}
+
+	for _, segment := range path {
+		if isNumeric(segment) {
+			continue
+		}
+
+		prop, ok := def.Properties[segment]
+		if !ok {
+			return ""
+		}
+
+		var targetDef string
+		if prop.Ref != "" {
+			targetDef = resolveRef(prop.Ref)
+		} else if prop.Type == "array" && prop.Items != nil && prop.Items.Ref != "" {
+			targetDef = resolveRef(prop.Items.Ref)
+		} else {
+			return ""
+		}
+
+		if targetDef == "" {
+			return ""
+		}
+
+		next, ok := parsed.Defs[targetDef]
+		if !ok {
+			return ""
+		}
+		defName = targetDef
+		def = next
+	}
+
+	return defName
 }
 
 // resolveRef extracts the definition name from a $ref like "#/$defs/Package".

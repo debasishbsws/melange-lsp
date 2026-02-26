@@ -7,17 +7,14 @@ import (
 	"strings"
 
 	"melange-lsp/internal/pipeline"
+	"melange-lsp/internal/schema"
 
 	"go.lsp.dev/protocol"
 )
 
-// getDefinition returns go-to-definition locations for pipeline uses: values
-// and with: keys. Returns nil if the cursor is not on a relevant token.
+// getDefinition returns go-to-definition locations for pipeline uses: values,
+// with: keys, and generic YAML keys (via schema.json fallback).
 func getDefinition(content string, position protocol.Position, registry *pipeline.Registry, dirs []string) []protocol.Location {
-	if registry == nil {
-		return nil
-	}
-
 	lines := strings.Split(content, "\n")
 	lineIdx := int(position.Line)
 	if lineIdx >= len(lines) {
@@ -30,17 +27,75 @@ func getDefinition(content string, position protocol.Position, registry *pipelin
 		col = len(line)
 	}
 
-	// Case 1: cursor on a uses: line — jump to the pipeline file
-	if loc := getUsesDefinition(line, lines, lineIdx, registry, dirs); loc != nil {
-		return []protocol.Location{*loc}
+	if registry != nil {
+		// Case 1: cursor on a uses: line — jump to the pipeline file
+		if loc := getUsesDefinition(line, lines, lineIdx, registry, dirs); loc != nil {
+			return []protocol.Location{*loc}
+		}
+
+		// Case 2: cursor on a with: key — jump to that input's definition in the pipeline file
+		if loc := getWithKeyDefinition(line, col, lines, lineIdx, registry, dirs); loc != nil {
+			return []protocol.Location{*loc}
+		}
 	}
 
-	// Case 2: cursor on a with: key — jump to that input's definition in the pipeline file
-	if loc := getWithKeyDefinition(line, col, lines, lineIdx, registry, dirs); loc != nil {
+	// Case 3: cursor on any YAML key — jump to its definition in schema.json
+	if loc := getSchemaDefinition(line, col, lines, lineIdx); loc != nil {
 		return []protocol.Location{*loc}
 	}
 
 	return nil
+}
+
+// getSchemaDefinition checks if the cursor is on a YAML key and returns a
+// location pointing to that property's definition in the embedded schema.json.
+func getSchemaDefinition(line string, col int, lines []string, lineIdx int) *protocol.Location {
+	schemaPath := schema.SchemaFilePath()
+	if schemaPath == "" {
+		return nil
+	}
+
+	// Extract the key name from the current line
+	stripped := strings.TrimLeft(line, " \t")
+	if stripped == "" || strings.HasPrefix(stripped, "#") {
+		return nil
+	}
+
+	work := stripped
+	if strings.HasPrefix(work, "- ") {
+		work = work[2:]
+	}
+
+	colonIdx := strings.Index(work, ":")
+	if colonIdx <= 0 {
+		return nil
+	}
+	keyName := work[:colonIdx]
+
+	// Cursor must be on or before the key portion
+	origKeyStart := strings.Index(line, keyName)
+	origColonPos := origKeyStart + len(keyName)
+	if col > origColonPos {
+		return nil
+	}
+
+	// Determine the YAML path to the parent context
+	cursorIndent := getIndentation(line)
+	path := findParentPath(lines, lineIdx, cursorIndent)
+
+	// Look up the line number in schema.json
+	schemaLine := schema.FindPropertyLine(path, keyName)
+	if schemaLine < 0 {
+		return nil
+	}
+
+	return &protocol.Location{
+		URI: protocol.DocumentURI(fmt.Sprintf("file://%s", schemaPath)),
+		Range: protocol.Range{
+			Start: protocol.Position{Line: uint32(schemaLine), Character: 0},
+			End:   protocol.Position{Line: uint32(schemaLine), Character: 0},
+		},
+	}
 }
 
 // getUsesDefinition checks if the current line is a uses: line and returns

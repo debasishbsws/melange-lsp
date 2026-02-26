@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"os"
 	"testing"
 )
 
@@ -175,6 +176,59 @@ func TestDeepNesting(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFindPropertyLine(t *testing.T) {
+	tests := []struct {
+		name string
+		path []string
+		key  string
+	}{
+		{"top-level package", nil, "package"},
+		{"top-level pipeline", nil, "pipeline"},
+		{"package name", []string{"package"}, "name"},
+		{"package version", []string{"package"}, "version"},
+		{"pipeline runs", []string{"pipeline", "0"}, "runs"},
+		{"pipeline uses", []string{"pipeline", "0"}, "uses"},
+		{"update enabled", []string{"update"}, "enabled"},
+		{"update github", []string{"update"}, "github"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			line := FindPropertyLine(tt.path, tt.key)
+			if line < 0 {
+				t.Errorf("FindPropertyLine(%v, %q) = -1, want >= 0", tt.path, tt.key)
+			}
+		})
+	}
+}
+
+func TestFindPropertyLineUnknown(t *testing.T) {
+	line := FindPropertyLine(nil, "nonexistent")
+	if line != -1 {
+		t.Errorf("FindPropertyLine(nil, 'nonexistent') = %d, want -1", line)
+	}
+
+	line = FindPropertyLine([]string{"package"}, "nonexistent")
+	if line != -1 {
+		t.Errorf("FindPropertyLine(['package'], 'nonexistent') = %d, want -1", line)
+	}
+}
+
+func TestSchemaFilePath(t *testing.T) {
+	path := SchemaFilePath()
+	if path == "" {
+		t.Fatal("SchemaFilePath() returned empty string")
+	}
+	// File should exist and contain valid JSON
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cannot read schema file at %s: %v", path, err)
+	}
+	if len(data) == 0 {
+		t.Error("schema file is empty")
 	}
 }
 
