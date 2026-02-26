@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"log"
 	"strings"
 
 	"melange-lsp/internal/pipeline"
@@ -51,7 +52,7 @@ func getCompletions(content string, position protocol.Position, registry *pipeli
 // getPipelineCompletions returns completions for uses: values and with: keys,
 // or nil if the cursor is not in a pipeline-specific context.
 func getPipelineCompletions(lines []string, line int, path []string, registry *pipeline.Registry, dirs []string) []protocol.CompletionItem {
-	if !pathContainsPipeline(path) {
+	if !pathContains(path, "pipeline") {
 		return nil
 	}
 
@@ -75,15 +76,19 @@ func getPipelineCompletions(lines []string, line int, path []string, registry *p
 		return items
 	}
 
-	// with: key completion — path ends with "with" (i.e. ["pipeline", "0", "with"])
-	if path[len(path)-1] == "with" {
+	// with: key completion — path contains "with" somewhere after "pipeline".
+	// We check anywhere in the path (not just last element) because
+	// findParentPath may include sibling keys and append "0" after "with".
+	if pathContains(path, "with") {
 		// Find the sibling "uses:" value in this pipeline step
 		usesValue := findSiblingUses(lines, line)
 		if usesValue == "" {
+			log.Printf("completion: in with: block but no sibling uses: found (path=%v)", path)
 			return nil
 		}
 		info, err := registry.LoadPipeline(usesValue, dirs)
 		if err != nil {
+			log.Printf("completion: failed to load pipeline %q: %v", usesValue, err)
 			return nil
 		}
 		return pipelineInputsToCompletions(info.Inputs)
@@ -149,11 +154,10 @@ func findSiblingUses(lines []string, line int) string {
 	return ""
 }
 
-// pathContainsPipeline reports whether the YAML path includes a "pipeline" key,
-// covering both top-level pipeline and subpackage pipeline contexts.
-func pathContainsPipeline(path []string) bool {
+// pathContains reports whether the YAML path includes the given key.
+func pathContains(path []string, key string) bool {
 	for _, p := range path {
-		if p == "pipeline" {
+		if p == key {
 			return true
 		}
 	}

@@ -1,11 +1,13 @@
 package schema
 
 import (
-	"reflect"
+	_ "embed"
+	"encoding/json"
 	"strings"
-
-	"chainguard.dev/melange/pkg/config"
 )
+
+//go:embed schema.json
+var schemaJSON []byte
 
 // CompletionItem represents a completion suggestion.
 type CompletionItem struct {
@@ -14,122 +16,124 @@ type CompletionItem struct {
 	Required    bool
 }
 
-// FieldInfo contains information about a struct field.
-type FieldInfo struct {
-	Name        string
-	YAMLName    string
-	Description string
-	Required    bool
-	Type        reflect.Type
+// jsonSchema represents the top-level JSON Schema structure.
+type jsonSchema struct {
+	Defs map[string]jsonSchemaDef `json:"$defs"`
 }
 
-// GetTopLevelKeys returns completion items for top-level configuration keys.
-func GetTopLevelKeys() []CompletionItem {
-	return getStructFields(reflect.TypeOf(config.Configuration{}))
+// jsonSchemaDef represents a single type definition in the schema.
+type jsonSchemaDef struct {
+	Properties map[string]jsonSchemaProperty `json:"properties"`
+	Required   []string                      `json:"required"`
 }
 
-// GetPackageKeys returns completion items for package section keys.
-func GetPackageKeys() []CompletionItem {
-	return getStructFields(reflect.TypeOf(config.Package{}))
+// jsonSchemaProperty represents a property within a type definition.
+type jsonSchemaProperty struct {
+	Ref         string             `json:"$ref"`
+	Description string             `json:"description"`
+	Type        string             `json:"type"`
+	Items       *jsonSchemaItemRef `json:"items"`
 }
 
-// GetPipelineKeys returns completion items for pipeline section keys.
-func GetPipelineKeys() []CompletionItem {
-	return getStructFields(reflect.TypeOf(config.Pipeline{}))
+// jsonSchemaItemRef represents the items field for array types.
+type jsonSchemaItemRef struct {
+	Ref string `json:"$ref"`
 }
 
-// GetSubpackageKeys returns completion items for subpackage section keys.
-func GetSubpackageKeys() []CompletionItem {
-	return getStructFields(reflect.TypeOf(config.Subpackage{}))
+var parsed jsonSchema
+
+func init() {
+	if err := json.Unmarshal(schemaJSON, &parsed); err != nil {
+		panic("schema: failed to parse embedded schema.json: " + err.Error())
+	}
 }
 
-// getStructFields extracts field information from a struct type.
-func getStructFields(t reflect.Type) []CompletionItem {
-	var items []CompletionItem
+// resolveRef extracts the definition name from a $ref like "#/$defs/Package".
+func resolveRef(ref string) string {
+	const prefix = "#/$defs/"
+	if strings.HasPrefix(ref, prefix) {
+		return ref[len(prefix):]
+	}
+	return ""
+}
 
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-
-		// Skip unexported fields
-		if !field.IsExported() {
-			continue
+// isNumeric reports whether s consists entirely of digits.
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
 		}
-
-		yamlTag := field.Tag.Get("yaml")
-		if yamlTag == "" || yamlTag == "-" {
-			continue
-		}
-
-		// Parse yaml tag (format: "name,omitempty")
-		parts := strings.Split(yamlTag, ",")
-		yamlName := parts[0]
-
-		// Check if field is required (no omitempty)
-		required := true
-		for _, part := range parts[1:] {
-			if part == "omitempty" {
-				required = false
-				break
-			}
-		}
-
-		// Get description from json tag comments or field name
-		description := getFieldDescription(field)
-
-		items = append(items, CompletionItem{
-			Label:       yamlName,
-			Description: description,
-			Required:    required,
-		})
 	}
-
-	return items
-}
-
-// getFieldDescription returns a description for a field.
-func getFieldDescription(field reflect.StructField) string {
-	// Use the field name as a basic description
-	// In the future, we could parse comments from source or use a separate doc file
-	name := field.Name
-
-	// Add type info for complex types
-	typeName := field.Type.String()
-	if strings.HasPrefix(typeName, "[]") {
-		return name + " (list)"
-	}
-	if strings.HasPrefix(typeName, "map[") {
-		return name + " (map)"
-	}
-	if field.Type.Kind() == reflect.Struct || field.Type.Kind() == reflect.Ptr {
-		return name + " (object)"
-	}
-
-	return name
+	return true
 }
 
 // GetCompletionsForPath returns completions for a given YAML path.
 // Path is a list of keys from root, e.g., ["package"] or ["pipeline", "0"].
 func GetCompletionsForPath(path []string) []CompletionItem {
-	if len(path) == 0 {
-		return GetTopLevelKeys()
+	def, ok := parsed.Defs["Configuration"]
+	if !ok {
+		return nil
 	}
 
-	switch path[0] {
-	case "package":
-		return GetPackageKeys()
-	case "pipeline":
-		// Inside a pipeline item
-		if len(path) >= 2 {
-			return GetPipelineKeys()
+	// Walk the path to resolve to the target definition.
+	for i := 0; i < len(path); i++ {
+		segment := path[i]
+
+		// Skip numeric indices — they were already handled when we
+		// resolved the array's items ref in the previous iteration.
+		if isNumeric(segment) {
+			continue
 		}
-		return nil
-	case "subpackages":
-		// Inside a subpackage item
-		if len(path) >= 2 {
-			return GetSubpackageKeys()
+
+		prop, ok := def.Properties[segment]
+		if !ok {
+			return nil
 		}
-		return nil
-	default:
-		return nil
+
+		// Determine the target definition name.
+		var targetDef string
+
+		if prop.Ref != "" {
+			// Direct $ref (e.g., "package" → "#/$defs/Package")
+			targetDef = resolveRef(prop.Ref)
+		} else if prop.Type == "array" && prop.Items != nil && prop.Items.Ref != "" {
+			// Array with $ref items (e.g., "pipeline" → items.$ref)
+			targetDef = resolveRef(prop.Items.Ref)
+		} else {
+			return nil
+		}
+
+		if targetDef == "" {
+			return nil
+		}
+
+		next, ok := parsed.Defs[targetDef]
+		if !ok {
+			return nil
+		}
+		def = next
 	}
+
+	return defToCompletions(def)
+}
+
+// defToCompletions converts a schema definition's properties into CompletionItems.
+func defToCompletions(def jsonSchemaDef) []CompletionItem {
+	requiredSet := make(map[string]bool, len(def.Required))
+	for _, r := range def.Required {
+		requiredSet[r] = true
+	}
+
+	items := make([]CompletionItem, 0, len(def.Properties))
+	for name, prop := range def.Properties {
+		items = append(items, CompletionItem{
+			Label:       name,
+			Description: prop.Description,
+			Required:    requiredSet[name],
+		})
+	}
+	return items
 }
