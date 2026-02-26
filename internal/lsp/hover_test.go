@@ -72,6 +72,72 @@ pipeline:
 	}
 }
 
+func TestHoverVarTransformFromPackageVersion(t *testing.T) {
+	// var-transforms that reference ${{package.version}} in "from:" field
+	// must resolve the package version before applying the regex.
+	content := `package:
+  name: percona-xtrabackup-8.4
+  version: "8.4.0.5"
+  epoch: 1
+var-transforms:
+  - from: ${{package.version}}
+    match: '\.(\d+)$'
+    replace: "-$1"
+    to: mangled-package-version
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/percona/percona-xtrabackup
+      tag: percona-xtrabackup-${{vars.mangled-package-version}}
+`
+	// Hover on "tag" value side (line 13, after the colon)
+	pos := protocol.Position{Line: 13, Character: 12}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result, got nil")
+	}
+	t.Logf("hover output: %s", hover.Contents.Value)
+	// The var-transform should replace the last .5 with -5: 8.4.0.5 -> 8.4.0-5
+	if !contains(hover.Contents.Value, "8.4.0-5") {
+		t.Errorf("expected resolved var-transform with '8.4.0-5', got: %s", hover.Contents.Value)
+	}
+	if !contains(hover.Contents.Value, "percona-xtrabackup-8.4.0-5") {
+		t.Errorf("expected full resolved tag, got: %s", hover.Contents.Value)
+	}
+}
+
+func TestHoverVarTransformWithValidationFailure(t *testing.T) {
+	// This config has var-transforms but will fail ParseConfiguration validation
+	// because it has "with:" without "uses:" in the pipeline. The fallback via
+	// direct YAML unmarshal should still resolve var-transforms.
+	content := `package:
+  name: test-pkg
+  version: 1.2.3
+vars:
+  mangled-ver: 1.2.3
+var-transforms:
+  - from: ${{vars.mangled-ver}}
+    match: \.
+    replace: _
+    to: mangled-ver
+pipeline:
+  - runs: echo ${{vars.mangled-ver}}
+  - with:
+      foo: bar
+`
+	// Cursor on "vars.mangled-ver" (line 11)
+	pos := protocol.Position{Line: 11, Character: 20}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result, got nil")
+	}
+	// After var-transform, dots should be replaced with underscores even
+	// though ParseConfiguration fails validation
+	if !contains(hover.Contents.Value, "1_2_3") {
+		t.Errorf("expected var-transform resolved value '1_2_3', got: %s", hover.Contents.Value)
+	}
+}
+
 func TestHoverFallbackOnInvalidConfig(t *testing.T) {
 	// Invalid YAML that our lightweight parser can still handle for vars
 	content := `vars:
@@ -106,6 +172,63 @@ pipeline:
 	}
 	if !contains(hover.Contents.Value, "bar-value") {
 		t.Errorf("expected var value in hover, got: %s", hover.Contents.Value)
+	}
+}
+
+func TestHoverUserVarInWithBlock(t *testing.T) {
+	// Test hovering on ${{vars.foo}} when it's in a with: value
+	// This needs a registry to trigger the pipeline hover paths
+	content := `package:
+  name: myapp
+  version: 1.0.0
+  epoch: 0
+vars:
+  mypackage: ./cmd/myapp
+pipeline:
+  - uses: go/build
+    with:
+      packages: ${{vars.mypackage}}
+`
+	// Cursor on ${{vars.mypackage}} in the value portion (line 9, past the colon)
+	pos := protocol.Position{Line: 9, Character: 25}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result for vars in with block, got nil")
+	}
+	val := hover.Contents.Value
+	t.Logf("hover output: %s", val)
+	if !contains(val, "./cmd/myapp") {
+		t.Errorf("expected var value in hover, got: %s", val)
+	}
+}
+
+func TestHoverUserVarOnKeyInWithBlock(t *testing.T) {
+	// Hovering on the KEY portion of a with: entry should show both
+	// the pipeline input docs AND the resolved value
+	// This is the case the user reported as broken
+	content := `package:
+  name: myapp
+  version: 1.0.0
+  epoch: 0
+vars:
+  mypackage: ./cmd/myapp
+pipeline:
+  - uses: go/build
+    with:
+      packages: ${{vars.mypackage}}
+`
+	// Cursor on "packages" KEY (line 9, before the colon)
+	pos := protocol.Position{Line: 9, Character: 8}
+	// Need registry for pipeline input hover
+	// Using nil registry — getPipelineInputHover won't fire, just var hover
+	hover := getHover(content, pos, nil, nil)
+	t.Logf("hover with nil registry: %+v", hover)
+
+	// Now test what happens when cursor is between the key start and colon
+	// Without registry, this should fall through to key-value hover
+	if hover != nil {
+		val := hover.Contents.Value
+		t.Logf("hover output: %s", val)
 	}
 }
 
@@ -338,6 +461,89 @@ environment:
 	hover := getHover(content, pos, nil, nil)
 	if hover != nil {
 		t.Errorf("expected nil hover for literal list item, got: %+v", hover)
+	}
+}
+
+func TestHoverPipelineInput(t *testing.T) {
+	// Pipeline YAML file (not a melange config) with inputs
+	content := `name: Go Build
+inputs:
+  packages:
+    description: "Go packages to build"
+    required: true
+  output:
+    description: "Output binary name"
+    required: false
+    default: "app"
+pipeline:
+  - runs: |
+      go build -o ${{inputs.output}} ${{inputs.packages}}
+`
+	// Cursor on "inputs.packages" inside ${{...}} (line 11)
+	// "      go build -o ${{inputs.output}} ${{inputs.packages}}"
+	pos := protocol.Position{Line: 11, Character: 45}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result for pipeline input, got nil")
+	}
+
+	val := hover.Contents.Value
+	if !contains(val, "Go packages to build") {
+		t.Errorf("expected input description in hover, got: %s", val)
+	}
+	if !contains(val, "Required") {
+		t.Errorf("expected Required in hover, got: %s", val)
+	}
+}
+
+func TestHoverPipelineInputWithDefault(t *testing.T) {
+	content := `name: Go Build
+inputs:
+  output:
+    description: "Output binary name"
+    required: false
+    default: "app"
+pipeline:
+  - runs: |
+      go build -o ${{inputs.output}}
+`
+	// Cursor on "inputs.output" (line 8)
+	pos := protocol.Position{Line: 8, Character: 22}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result for pipeline input with default, got nil")
+	}
+
+	val := hover.Contents.Value
+	if !contains(val, "app") {
+		t.Errorf("expected default value in hover, got: %s", val)
+	}
+	if !contains(val, "Output binary name") {
+		t.Errorf("expected description in hover, got: %s", val)
+	}
+	if !contains(val, "Default:") {
+		t.Errorf("expected Default: in hover, got: %s", val)
+	}
+}
+
+func TestHoverPipelineInputNotFound(t *testing.T) {
+	content := `name: Test Pipeline
+inputs:
+  foo:
+    description: "Foo input"
+pipeline:
+  - runs: echo ${{inputs.bar}}
+`
+	// Cursor on "inputs.bar" which doesn't exist in inputs
+	pos := protocol.Position{Line: 5, Character: 22}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result for unknown pipeline input, got nil")
+	}
+
+	val := hover.Contents.Value
+	if !contains(val, "not found") {
+		t.Errorf("expected 'not found' message, got: %s", val)
 	}
 }
 

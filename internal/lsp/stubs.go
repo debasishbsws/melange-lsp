@@ -12,10 +12,6 @@ func (s *Server) CodeAction(ctx context.Context, params *protocol.CodeActionPara
 	return nil, nil
 }
 
-func (s *Server) CodeLens(ctx context.Context, params *protocol.CodeLensParams) ([]protocol.CodeLens, error) {
-	return nil, nil
-}
-
 func (s *Server) CodeLensRefresh(ctx context.Context) error {
 	return nil
 }

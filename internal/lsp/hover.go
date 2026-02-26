@@ -8,12 +8,17 @@ import (
 	"strconv"
 	"strings"
 
+	"runtime"
+
 	"melange-lsp/internal/parser"
 	"melange-lsp/internal/pipeline"
 
+	apko_types "chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/melange/pkg/build"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/psanford/memfs"
 	"go.lsp.dev/protocol"
+	"gopkg.in/yaml.v3"
 )
 
 // builtinVarDescriptions maps well-known ${{...}} variable paths to descriptions.
@@ -60,7 +65,7 @@ func getHover(content string, position protocol.Position, registry *pipeline.Reg
 
 	// Check for pipeline-specific hovers before template resolution
 	if registry != nil {
-		if markdown := getUsesHover(line, registry, dirs); markdown != "" {
+		if markdown := getUsesHover(content, lines, lineIdx, registry, dirs); markdown != "" {
 			return &protocol.Hover{
 				Contents: protocol.MarkupContent{
 					Kind:  protocol.Markdown,
@@ -68,7 +73,7 @@ func getHover(content string, position protocol.Position, registry *pipeline.Reg
 				},
 			}
 		}
-		if markdown := getPipelineInputHover(line, col, lines, lineIdx, registry, dirs); markdown != "" {
+		if markdown := getPipelineInputHover(content, line, col, lines, lineIdx, registry, dirs); markdown != "" {
 			return &protocol.Hover{
 				Contents: protocol.MarkupContent{
 					Kind:  protocol.Markdown,
@@ -120,9 +125,10 @@ func getHover(content string, position protocol.Position, registry *pipeline.Reg
 }
 
 // getUsesHover returns hover documentation when the cursor is on a uses: line
-// in a pipeline step. It loads the pipeline definition and shows the name,
-// inputs summary, and runs script.
-func getUsesHover(line string, registry *pipeline.Registry, dirs []string) string {
+// in a pipeline step. It compiles the pipeline with the sibling with: values
+// to show the resolved result.
+func getUsesHover(content string, lines []string, lineIdx int, registry *pipeline.Registry, dirs []string) string {
+	line := lines[lineIdx]
 	stripped := strings.TrimSpace(line)
 	if strings.HasPrefix(stripped, "- ") {
 		stripped = stripped[2:]
@@ -136,6 +142,12 @@ func getUsesHover(line string, registry *pipeline.Registry, dirs []string) strin
 		return ""
 	}
 
+	// Try to compile the pipeline with its with: values
+	if compiled := compilePipelineForHover(content, usesValue, lines, lineIdx, dirs); compiled != "" {
+		return compiled
+	}
+
+	// Fallback to raw pipeline YAML
 	info, err := registry.LoadPipeline(usesValue, dirs)
 	if err != nil {
 		return ""
@@ -154,11 +166,186 @@ func getUsesHover(line string, registry *pipeline.Registry, dirs []string) strin
 	return header + "\n\n```yaml\n" + raw + "\n```"
 }
 
+// compileConfiguration parses the document as a melange config and compiles it
+// using build.Build.Compile(), returning the compiled configuration. Returns
+// nil if parsing or compilation fails.
+func compileConfiguration(content string, dirs []string) *config.Configuration {
+	fs := memfs.New()
+	filename := "melange.yaml"
+	if err := fs.WriteFile(filename, []byte(content), 0644); err != nil {
+		return nil
+	}
+
+	ctx := context.Background()
+	cfg, err := config.ParseConfiguration(ctx, filename, config.WithFS(fs))
+	if err != nil {
+		return nil
+	}
+
+	b := &build.Build{
+		Configuration: cfg,
+		PipelineDirs:  dirs,
+		Arch:          apko_types.ParseArchitecture(runtime.GOARCH),
+	}
+
+	if err := b.Compile(ctx); err != nil {
+		log.Printf("melange-lsp: hover: Build.Compile failed: %v", err)
+		return nil
+	}
+
+	return cfg
+}
+
+// compilePipelineForHover compiles the full melange configuration and finds
+// the pipeline step matching usesValue, returning formatted markdown.
+func compilePipelineForHover(content, usesValue string, lines []string, lineIdx int, dirs []string) string {
+	// Try full Build.Compile() with the document as a melange config
+	cfg := compileConfiguration(content, dirs)
+	if cfg != nil {
+		if p := findCompiledPipelineInConfig(usesValue, cfg); p != nil {
+			return formatCompiledPipeline(usesValue, p)
+		}
+	}
+
+	// Fallback: compile just the pipeline step (for pipeline files or when
+	// Build.Compile fails). This resolves ${{inputs.*}} and expands nested
+	// uses: but won't have package-level variables like ${{context.name}}.
+	withMap := findSiblingWith(lines, lineIdx)
+	p := config.Pipeline{
+		Uses: usesValue,
+		With: withMap,
+	}
+
+	compiled := &build.Compiled{PipelineDirs: dirs}
+	pipelines := []config.Pipeline{p}
+
+	ctx := context.Background()
+	if err := compiled.CompilePipelines(ctx, &build.SubstitutionMap{Substitutions: make(map[string]string)}, pipelines); err != nil {
+		return ""
+	}
+
+	return formatCompiledPipeline(usesValue, &pipelines[0])
+}
+
+func formatCompiledPipeline(usesValue string, p *config.Pipeline) string {
+	header := fmt.Sprintf("**`%s`** (compiled)", usesValue)
+
+	out, err := yaml.Marshal(p)
+	if err != nil {
+		return ""
+	}
+
+	return header + "\n\n```yaml\n" + strings.TrimSpace(string(out)) + "\n```"
+}
+
+// findCompiledPipelineInConfig searches all pipeline lists in a configuration
+// (main pipeline, test pipeline, subpackage pipelines, and subpackage test
+// pipelines) for a step with the given uses value.
+func findCompiledPipelineInConfig(usesValue string, cfg *config.Configuration) *config.Pipeline {
+	if p := findCompiledPipeline(usesValue, cfg.Pipeline); p != nil {
+		return p
+	}
+	if cfg.Test != nil {
+		if p := findCompiledPipeline(usesValue, cfg.Test.Pipeline); p != nil {
+			return p
+		}
+	}
+	for _, sp := range cfg.Subpackages {
+		if p := findCompiledPipeline(usesValue, sp.Pipeline); p != nil {
+			return p
+		}
+		if sp.Test != nil {
+			if p := findCompiledPipeline(usesValue, sp.Test.Pipeline); p != nil {
+				return p
+			}
+		}
+	}
+	return nil
+}
+
+// findCompiledPipeline searches a pipeline list for a step with the given uses value.
+func findCompiledPipeline(usesValue string, pipelines []config.Pipeline) *config.Pipeline {
+	for i := range pipelines {
+		if pipelines[i].Uses == usesValue {
+			return &pipelines[i]
+		}
+		// Search nested pipelines
+		if p := findCompiledPipeline(usesValue, pipelines[i].Pipeline); p != nil {
+			return p
+		}
+	}
+	return nil
+}
+
+// findSiblingWith extracts the with: key-value pairs that are siblings to the
+// current uses: line in the YAML structure.
+func findSiblingWith(lines []string, usesLineIdx int) map[string]string {
+	usesLine := lines[usesLineIdx]
+	usesIndent := getIndentation(usesLine)
+
+	// Account for list item prefix: "  - uses:" has indent 2 but the sibling
+	// "with:" will be at indent 4 (after the "- " prefix)
+	siblingIndent := usesIndent
+	stripped := strings.TrimLeft(usesLine, " \t")
+	if strings.HasPrefix(stripped, "- ") {
+		siblingIndent = usesIndent + 2
+	}
+
+	// Look for with: at the sibling indent level (following the uses: line)
+	withLineIdx := -1
+	for i := usesLineIdx + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := getIndentation(lines[i])
+		if indent < siblingIndent {
+			break // left the pipeline step
+		}
+		if indent == siblingIndent && strings.HasPrefix(trimmed, "with:") {
+			withLineIdx = i
+			break
+		}
+		if indent == siblingIndent && !strings.HasPrefix(trimmed, "with:") {
+			break // sibling key that isn't with:
+		}
+	}
+
+	if withLineIdx < 0 {
+		return nil
+	}
+
+	withIndent := getIndentation(lines[withLineIdx])
+	result := make(map[string]string)
+
+	for i := withLineIdx + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := getIndentation(lines[i])
+		if indent <= withIndent {
+			break // left the with: block
+		}
+		colonIdx := strings.Index(trimmed, ":")
+		if colonIdx > 0 {
+			key := trimmed[:colonIdx]
+			val := strings.TrimSpace(trimmed[colonIdx+1:])
+			result[key] = val
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // getPipelineInputHover returns hover documentation for a with: key in a
 // pipeline step. It detects if the cursor is on a key inside a with: block,
 // looks up the sibling uses: value, loads the pipeline, and returns the input's
 // description, required/optional status, and default value.
-func getPipelineInputHover(line string, col int, lines []string, lineIdx int, registry *pipeline.Registry, dirs []string) string {
+func getPipelineInputHover(content string, line string, col int, lines []string, lineIdx int, registry *pipeline.Registry, dirs []string) string {
 	// Check if this line looks like a key: value inside a with: block
 	stripped := strings.TrimLeft(line, " \t")
 	if stripped == "" || strings.HasPrefix(stripped, "#") {
@@ -177,6 +364,7 @@ func getPipelineInputHover(line string, col int, lines []string, lineIdx int, re
 	}
 
 	keyName := work[:colonIdx]
+	rawValue := strings.TrimSpace(work[colonIdx+1:])
 
 	// Cursor must be on the key portion
 	origKeyStart := strings.Index(line, keyName)
@@ -235,6 +423,47 @@ func getPipelineInputHover(line string, col int, lines []string, lineIdx int, re
 	// Build markdown documentation
 	var parts []string
 	parts = append(parts, fmt.Sprintf("**`%s`** — %s pipeline input", keyName, usesValue))
+
+	// Show the compiled/resolved value if the raw value contains templates
+	if strings.Contains(rawValue, "${{") {
+		subMap := buildSubstitutionMap(content)
+		if subMap != nil {
+			// Check if we're in a range context
+			rangeName := findEnclosingRange(lines, lineIdx)
+			if rangeName != "" {
+				cfg, parseErr := parser.Parse(content)
+				if parseErr == nil {
+					for _, d := range cfg.Data {
+						if d.Name == rangeName {
+							keys := make([]string, 0, len(d.Items))
+							for k := range d.Items {
+								keys = append(keys, k)
+							}
+							sort.Strings(keys)
+							var items []string
+							for _, k := range keys {
+								localMap := make(map[string]string, len(subMap)+2)
+								for mk, mv := range subMap {
+									localMap[mk] = mv
+								}
+								localMap["range.key"] = k
+								localMap["range.value"] = d.Items[k]
+								resolved := resolveTemplateString(rawValue, localMap)
+								items = append(items, fmt.Sprintf("- `%s`", resolved))
+							}
+							parts = append(parts, fmt.Sprintf("**Resolved values:**\n\n%s", strings.Join(items, "\n")))
+						}
+					}
+				}
+			} else {
+				resolved := resolveTemplateString(rawValue, subMap)
+				if resolved != rawValue {
+					parts = append(parts, fmt.Sprintf("Resolved: **%s**", resolved))
+				}
+			}
+		}
+	}
+
 	if input.Description != "" {
 		parts = append(parts, input.Description)
 	}
@@ -280,51 +509,97 @@ func findExpressionAt(line string, col int) (expr string, start, end int) {
 	return "", 0, 0
 }
 
-// buildSubstitutionMap uses melange's ParseConfiguration to build a map of
-// variable names to their resolved values. Returns nil if parsing fails.
+// buildSubstitutionMap builds a map of variable names to their resolved values.
+// It tries melange's NewSubstitutionMap first (full validation + all runtime vars),
+// then falls back to direct YAML unmarshal (no validation, still gets vars +
+// var-transforms), and finally falls back to the lightweight parser (vars only).
 func buildSubstitutionMap(content string) map[string]string {
+	// Try full ParseConfiguration + NewSubstitutionMap first — this gives us
+	// everything: package.*, vars.*, targets.*, build.*, host.*, cross.*
+	if cfg := tryParseConfiguration(content); cfg != nil {
+		arch := apko_types.ParseArchitecture(runtime.GOARCH)
+		sm, err := build.NewSubstitutionMap(cfg, arch, "gnu", nil)
+		if err == nil {
+			return cleanSubstitutionKeys(sm.Substitutions)
+		}
+		// Fall back to manual extraction if NewSubstitutionMap fails
+		return extractSubstitutions(cfg)
+	}
+
+	// Fallback: direct YAML unmarshal without validation — still gets vars
+	// and var-transforms even when the config has validation errors (e.g.,
+	// invalid package name, missing version, pipeline validation failures).
+	cfg := &config.Configuration{}
+	if err := yaml.Unmarshal([]byte(content), cfg); err == nil {
+		return extractSubstitutions(cfg)
+	}
+
+	// Last resort: lightweight parser (vars only, no var-transforms)
+	parsed, err := parser.Parse(content)
+	if err != nil || len(parsed.Vars) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string, len(parsed.Vars))
+	for k, v := range parsed.Vars {
+		result["vars."+k] = v
+	}
+	return result
+}
+
+// tryParseConfiguration attempts to parse content using melange's full parser.
+func tryParseConfiguration(content string) *config.Configuration {
 	fs := memfs.New()
 	filename := "melange.yaml"
 	if err := fs.WriteFile(filename, []byte(content), 0644); err != nil {
-		log.Printf("melange-lsp: hover: failed to write to memfs: %v", err)
 		return nil
 	}
 
 	ctx := context.Background()
 	cfg, err := config.ParseConfiguration(ctx, filename, config.WithFS(fs))
 	if err != nil {
-		log.Printf("melange-lsp: hover: ParseConfiguration failed: %v", err)
 		return nil
 	}
+	return cfg
+}
 
-	result := map[string]string{
-		"package.name":         cfg.Package.Name,
-		"package.version":      cfg.Package.Version,
-		"package.epoch":        strconv.FormatUint(cfg.Package.Epoch, 10),
-		"package.full-version": fmt.Sprintf("%s-r%d", cfg.Package.Version, cfg.Package.Epoch),
-		"package.description":  cfg.Package.Description,
-	}
-
-	// Get vars (including cross-var references)
-	varsMap, err := cfg.GetVarsFromConfig()
-	if err != nil {
-		log.Printf("melange-lsp: hover: GetVarsFromConfig failed: %v", err)
-		return result
-	}
-
-	// Apply var-transforms
-	if err := cfg.PerformVarSubstitutions(varsMap); err != nil {
-		log.Printf("melange-lsp: hover: PerformVarSubstitutions failed: %v", err)
-	}
-
-	// Convert from "${{vars.foo}}" keys to "vars.foo" keys
-	for k, v := range varsMap {
+// cleanSubstitutionKeys converts "${{key}}" formatted keys to plain "key" format.
+func cleanSubstitutionKeys(m map[string]string) map[string]string {
+	result := make(map[string]string, len(m))
+	for k, v := range m {
 		clean := strings.TrimPrefix(k, "${{")
 		clean = strings.TrimSuffix(clean, "}}")
 		result[clean] = v
 	}
-
 	return result
+}
+
+// extractSubstitutions extracts package variables, user-defined vars, and
+// applies var-transforms from a parsed configuration. This replicates
+// melange's buildConfigMap + PerformVarSubstitutions flow.
+func extractSubstitutions(cfg *config.Configuration) map[string]string {
+	// Build the config map the same way melange does: package vars + user vars
+	// all keyed with ${{...}} wrappers. This is needed because var-transforms
+	// can reference package variables (e.g., from: ${{package.version}}).
+	configMap := map[string]string{
+		"${{package.name}}":         cfg.Package.Name,
+		"${{package.version}}":      cfg.Package.Version,
+		"${{package.epoch}}":        strconv.FormatUint(cfg.Package.Epoch, 10),
+		"${{package.full-version}}": fmt.Sprintf("%s-r%d", cfg.Package.Version, cfg.Package.Epoch),
+		"${{package.description}}":  cfg.Package.Description,
+	}
+
+	// Add user-defined vars
+	for k, v := range cfg.Vars {
+		configMap[fmt.Sprintf("${{vars.%s}}", k)] = v
+	}
+
+	// Apply var-transforms (resolves from: ${{package.version}} etc.)
+	if err := cfg.PerformVarSubstitutions(configMap); err != nil {
+		log.Printf("melange-lsp: hover: PerformVarSubstitutions failed: %v", err)
+	}
+
+	return cleanSubstitutionKeys(configMap)
 }
 
 // lookupHoverInfo returns markdown hover text for a melange variable expression.
@@ -354,12 +629,54 @@ func lookupHoverInfo(expr, content string, lines []string, lineIdx int, subMap m
 		return fmt.Sprintf("`${{%s}}` — User-defined variable (not found in `vars:`)", expr)
 	}
 
+	// Check inputs.* — pipeline input variables (works in pipeline YAML files)
+	if strings.HasPrefix(expr, "inputs.") {
+		return lookupInputHover(expr, content)
+	}
+
 	// Check range.key / range.value
 	if expr == "range.key" || expr == "range.value" {
 		return lookupRangeHover(expr, content, lines, lineIdx)
 	}
 
 	return ""
+}
+
+// lookupInputHover resolves ${{inputs.foo}} by parsing the current file as a
+// pipeline definition and returning the input's documentation.
+func lookupInputHover(expr, content string) string {
+	inputName := strings.TrimPrefix(expr, "inputs.")
+
+	var info pipeline.PipelineInfo
+	if err := yaml.Unmarshal([]byte(content), &info); err != nil {
+		return fmt.Sprintf("`${{%s}}` — Pipeline input", expr)
+	}
+
+	input, ok := info.Inputs[inputName]
+	if !ok {
+		return fmt.Sprintf("`${{%s}}` — Pipeline input (not found in `inputs:`)", expr)
+	}
+
+	var parts []string
+	desc := strings.TrimSpace(input.Description)
+	if input.Default != "" {
+		parts = append(parts, fmt.Sprintf("**%s**\n\n`${{%s}}` — Pipeline input", input.Default, expr))
+	} else if desc != "" {
+		parts = append(parts, fmt.Sprintf("**`${{%s}}`**\n\n%s", expr, desc))
+	} else {
+		parts = append(parts, fmt.Sprintf("**`${{%s}}`** — Pipeline input", expr))
+	}
+	if desc != "" && input.Default != "" {
+		parts = append(parts, desc)
+	}
+	if input.Required {
+		parts = append(parts, "*Required*")
+	}
+	if input.Default != "" {
+		parts = append(parts, fmt.Sprintf("Default: `%s`", input.Default))
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // lookupRangeHover resolves range variable hover info by finding the enclosing

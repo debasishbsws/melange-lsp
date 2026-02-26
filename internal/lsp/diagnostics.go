@@ -12,6 +12,7 @@ import (
 	"chainguard.dev/melange/pkg/config"
 	"github.com/psanford/memfs"
 	"go.lsp.dev/protocol"
+	"gopkg.in/yaml.v3"
 )
 
 var linePattern = regexp.MustCompile(`line (\d+)`)
@@ -93,6 +94,12 @@ func ValidateDocument(uri protocol.DocumentURI, content string) []protocol.Diagn
 	)
 
 	if err != nil {
+		// Fall back to parsing as a pipeline definition
+		if isPipelineFile([]byte(content)) {
+			log.Printf("melange-lsp: validation: parsed as pipeline")
+			return diagnostics
+		}
+
 		log.Printf("melange-lsp: validation error: %v", err)
 		diagnostics = append(diagnostics, diagnosticForError("melange", err))
 	} else {
@@ -100,6 +107,17 @@ func ValidateDocument(uri protocol.DocumentURI, content string) []protocol.Diagn
 	}
 
 	return diagnostics
+}
+
+// isPipelineFile checks if the content parses as a valid pipeline definition.
+// A valid pipeline must have at least one pipeline-specific field populated.
+func isPipelineFile(content []byte) bool {
+	var p config.Pipeline
+	if err := yaml.Unmarshal(content, &p); err != nil {
+		return false
+	}
+	// Must look like an actual pipeline, not just any YAML that happens to parse
+	return p.Runs != "" || p.Uses != "" || len(p.Pipeline) > 0 || len(p.Inputs) > 0
 }
 
 // ValidateDocumentFromFile validates a melange YAML file and returns diagnostics.
@@ -128,6 +146,12 @@ func ValidateDocumentFromFile(uri protocol.DocumentURI) []protocol.Diagnostic {
 	_, err = config.ParseConfiguration(ctx, absPath)
 
 	if err != nil {
+		// Fall back to parsing as a pipeline definition
+		b, readErr := os.ReadFile(absPath) // #nosec G304
+		if readErr == nil && isPipelineFile(b) {
+			return diagnostics
+		}
+
 		diagnostics = append(diagnostics, diagnosticForError("melange", err))
 	}
 

@@ -58,6 +58,7 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 			CompletionProvider: &protocol.CompletionOptions{
 				TriggerCharacters: []string{"\n", " ", ":"},
 			},
+			CodeLensProvider: &protocol.CodeLensOptions{},
 		},
 		ServerInfo: &protocol.ServerInfo{
 			Name:    "melange-lsp",
@@ -181,6 +182,19 @@ func (s *Server) Hover(ctx context.Context, params *protocol.HoverParams) (*prot
 	return getHover(doc.Content, params.Position, s.registry, dirs), nil
 }
 
+// CodeLens handles the textDocument/codeLens request.
+func (s *Server) CodeLens(ctx context.Context, params *protocol.CodeLensParams) ([]protocol.CodeLens, error) {
+	s.mu.Lock()
+	doc, exists := s.documents[params.TextDocument.URI]
+	s.mu.Unlock()
+
+	if !exists {
+		return nil, nil
+	}
+
+	return getCodeLenses(doc.Content), nil
+}
+
 // SetClient sets the LSP client for sending notifications.
 func (s *Server) SetClient(client protocol.Client) {
 	s.mu.Lock()
@@ -205,13 +219,42 @@ func (s *Server) publishDiagnostics(ctx context.Context, uri protocol.DocumentUR
 }
 
 // pipelineDirsForURI returns the on-disk pipeline directories to search for a
-// given document URI. This is the pipelines/ directory that is a sibling of the
-// file being edited.
+// given document URI. It includes:
+// 1. A pipelines/ sibling to the file (for melange config files)
+// 2. Any ancestor directory named "pipelines" (for files within a pipelines/ tree)
 func pipelineDirsForURI(uri protocol.DocumentURI) []string {
 	u, err := url.Parse(string(uri))
 	if err != nil || u.Path == "" {
 		return nil
 	}
-	dir := filepath.Join(filepath.Dir(u.Path), "pipelines")
-	return []string{dir}
+
+	seen := make(map[string]bool)
+	var dirs []string
+	addDir := func(d string) {
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+
+	fileDir := filepath.Dir(u.Path)
+
+	// Sibling pipelines/ directory (for melange config files)
+	addDir(filepath.Join(fileDir, "pipelines"))
+
+	// Walk up looking for an ancestor named "pipelines" (for pipeline files)
+	dir := fileDir
+	for {
+		if filepath.Base(dir) == "pipelines" {
+			addDir(dir)
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return dirs
 }
