@@ -558,6 +558,42 @@ func TestHoverNoVariable(t *testing.T) {
 	}
 }
 
+func TestHoverRangeSubpkgName(t *testing.T) {
+	// Regression: in a range context, ${{subpkg.name}} should resolve
+	// differently per range iteration, not be stuck on the first value.
+	content := `package:
+  name: librosa
+  version: 1.0.0
+data:
+  - name: py-versions
+    items:
+      "3.11": "3.11"
+      "3.12": "3.12"
+      "3.13": "3.13"
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-librosa
+    description: installed for python${{range.key}} ${{subpkg.name}}`
+
+	// Hover on "description" key (line 12, col 4 = on the "d")
+	pos := protocol.Position{Line: 12, Character: 4}
+	hover := getHover(content, pos, nil, nil)
+	if hover == nil {
+		t.Fatal("expected hover result, got nil")
+	}
+
+	md := hover.Contents.Value
+	t.Logf("hover markdown:\n%s", md)
+
+	// Each range iteration should resolve subpkg.name with that iteration's range.key
+	if !contains(md, "py3.12-librosa") {
+		t.Errorf("expected py3.12-librosa in hover (subpkg.name should vary per iteration), got: %s", md)
+	}
+	if !contains(md, "py3.13-librosa") {
+		t.Errorf("expected py3.13-librosa in hover (subpkg.name should vary per iteration), got: %s", md)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && containsStr(s, substr)
 }

@@ -89,3 +89,198 @@ func TestWithCompletionShowsDetails(t *testing.T) {
 	}
 	t.Error("'output' not found in completions")
 }
+
+func TestTemplateCompletionNamespaces(t *testing.T) {
+	content := `package:
+  name: test
+  version: 1.0.0
+pipeline:
+  - runs: echo ${{`
+
+	// Cursor right after ${{ on line 4
+	pos := protocol.Position{Line: 4, Character: 20}
+	items := getCompletions(content, pos, nil, nil)
+
+	if len(items) == 0 {
+		t.Fatal("expected namespace completions, got none")
+	}
+
+	found := map[string]bool{}
+	for _, item := range items {
+		found[item.Label] = true
+	}
+
+	for _, ns := range []string{"package", "vars", "targets", "build", "host", "cross", "subpkg", "context"} {
+		if !found[ns] {
+			t.Errorf("expected namespace %q in completions, got: %v", ns, found)
+		}
+	}
+}
+
+func TestTemplateCompletionNamespaceTextEdit(t *testing.T) {
+	content := `pipeline:
+  - runs: echo ${{r`
+
+	// Cursor after "r" on line 1: "${{r" starts at col 17, "${{" is 3 chars, so col 20 is after "r"
+	pos := protocol.Position{Line: 1, Character: 20}
+	items := getCompletions(content, pos, nil, nil)
+
+	found := false
+	for _, item := range items {
+		if item.Label == "range" {
+			found = true
+			if item.TextEdit == nil {
+				t.Fatal("expected TextEdit for 'range', got nil")
+			}
+			// The edit should replace from right after "${{" (col 18) to cursor (col 19)
+			if item.TextEdit.Range.Start.Character != 18 {
+				t.Errorf("expected edit start at col 18, got %d", item.TextEdit.Range.Start.Character)
+			}
+			if item.TextEdit.Range.End.Character != 19 {
+				t.Errorf("expected edit end at col 19, got %d", item.TextEdit.Range.End.Character)
+			}
+			if item.TextEdit.NewText != "range" {
+				t.Errorf("expected NewText %q, got %q", "range", item.TextEdit.NewText)
+			}
+		}
+	}
+	if !found {
+		t.Error("'range' not found in completions")
+	}
+}
+
+func TestTemplateCompletionPackageDot(t *testing.T) {
+	content := `package:
+  name: test
+  version: 1.0.0
+pipeline:
+  - runs: echo ${{package.`
+
+	pos := protocol.Position{Line: 4, Character: 28}
+	items := getCompletions(content, pos, nil, nil)
+
+	if len(items) == 0 {
+		t.Fatal("expected package key completions, got none")
+	}
+
+	found := map[string]bool{}
+	for _, item := range items {
+		found[item.Label] = true
+	}
+
+	for _, key := range []string{"name", "version", "epoch", "full-version"} {
+		if !found[key] {
+			t.Errorf("expected %q in package completions, got: %v", key, found)
+		}
+	}
+}
+
+func TestTemplateCompletionVars(t *testing.T) {
+	content := `package:
+  name: test
+  version: 1.0.0
+vars:
+  py-version: "3.12"
+  mandir: /usr/share/man
+pipeline:
+  - runs: echo ${{vars.`
+
+	pos := protocol.Position{Line: 7, Character: 23}
+	items := getCompletions(content, pos, nil, nil)
+
+	if len(items) == 0 {
+		t.Fatal("expected vars completions, got none")
+	}
+
+	found := map[string]bool{}
+	for _, item := range items {
+		found[item.Label] = true
+	}
+
+	if !found["py-version"] {
+		t.Errorf("expected 'py-version' in vars completions, got: %v", found)
+	}
+	if !found["mandir"] {
+		t.Errorf("expected 'mandir' in vars completions, got: %v", found)
+	}
+}
+
+func TestTemplateCompletionPartial(t *testing.T) {
+	content := `package:
+  name: test
+  version: 1.0.0
+pipeline:
+  - runs: echo ${{package.n`
+
+	pos := protocol.Position{Line: 4, Character: 29}
+	items := getCompletions(content, pos, nil, nil)
+
+	if len(items) == 0 {
+		t.Fatal("expected filtered completions, got none")
+	}
+
+	found := map[string]bool{}
+	for _, item := range items {
+		found[item.Label] = true
+		// Verify TextEdit replaces from after "${{" to cursor, inserting full "package.name"
+		if item.Label == "name" && item.TextEdit != nil {
+			if item.TextEdit.NewText != "package.name" {
+				t.Errorf("expected NewText %q, got %q", "package.name", item.TextEdit.NewText)
+			}
+		}
+	}
+
+	if !found["name"] {
+		t.Errorf("expected 'name' in filtered completions, got: %v", found)
+	}
+	if found["version"] {
+		t.Errorf("'version' should be filtered out by partial 'n', got: %v", found)
+	}
+}
+
+func TestTemplateCompletionResolved(t *testing.T) {
+	content := `package:
+  name: mypackage
+  version: 2.5.0
+pipeline:
+  - runs: echo ${{package.`
+
+	pos := protocol.Position{Line: 4, Character: 28}
+	items := getCompletions(content, pos, nil, nil)
+
+	for _, item := range items {
+		if item.Label == "name" {
+			if item.Detail == "" {
+				t.Error("expected detail with resolved value for 'name'")
+			}
+			return
+		}
+	}
+	t.Error("'name' not found in completions")
+}
+
+func TestTemplateCompletionSubpkg(t *testing.T) {
+	content := `package:
+  name: test
+  version: 1.0.0
+subpackages:
+  - name: test-dev
+    pipeline:
+      - runs: echo ${{subpkg.`
+
+	pos := protocol.Position{Line: 6, Character: 29}
+	items := getCompletions(content, pos, nil, nil)
+
+	if len(items) == 0 {
+		t.Fatal("expected subpkg completions, got none")
+	}
+
+	found := map[string]bool{}
+	for _, item := range items {
+		found[item.Label] = true
+	}
+
+	if !found["name"] {
+		t.Errorf("expected 'name' in subpkg completions, got: %v", found)
+	}
+}

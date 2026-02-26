@@ -56,7 +56,7 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 			DefinitionProvider:     true,
 			DocumentSymbolProvider: true,
 			CompletionProvider: &protocol.CompletionOptions{
-				TriggerCharacters: []string{"\n", " ", ":"},
+				TriggerCharacters: []string{"\n", " ", ":", "$"},
 			},
 			CodeLensProvider: &protocol.CodeLensOptions{},
 		},

@@ -15,6 +15,11 @@ func getCompletions(content string, position protocol.Position, registry *pipeli
 	lines := strings.Split(content, "\n")
 	line := int(position.Line)
 
+	// Check for template variable completions first
+	if items := getTemplateCompletions(content, lines, line, int(position.Character)); items != nil {
+		return items
+	}
+
 	// Determine context from cursor position
 	path := getYAMLPath(lines, line, int(position.Character))
 
@@ -285,4 +290,123 @@ func getIndentation(line string) int {
 		}
 	}
 	return count
+}
+
+// templateNamespaces lists the top-level namespaces for ${{...}} completions.
+var templateNamespaces = []string{
+	"package", "vars", "targets", "build", "host", "cross", "subpkg", "context", "inputs", "range",
+}
+
+// getTemplateCompletions returns completions for ${{...}} template expressions,
+// or nil if the cursor is not inside a template expression.
+func getTemplateCompletions(content string, lines []string, line, character int) []protocol.CompletionItem {
+	if line >= len(lines) {
+		return nil
+	}
+
+	currentLine := lines[line]
+	// Get the text up to the cursor position
+	col := character
+	if col > len(currentLine) {
+		col = len(currentLine)
+	}
+	prefix := currentLine[:col]
+
+	// Find the last unclosed ${{ before the cursor
+	openIdx := strings.LastIndex(prefix, "${{")
+	if openIdx < 0 {
+		return nil
+	}
+
+	// Make sure there's no }} closing it before the cursor
+	afterOpen := prefix[openIdx+3:]
+	if strings.Contains(afterOpen, "}}") {
+		return nil
+	}
+
+	// Extract the partial expression (e.g., "", "package", "package.n")
+	expr := strings.TrimSpace(afterOpen)
+
+	// The replace range starts right after "${{" and ends at cursor
+	replaceStart := uint32(openIdx + 3)
+	editRange := protocol.Range{
+		Start: protocol.Position{Line: uint32(line), Character: replaceStart},
+		End:   protocol.Position{Line: uint32(line), Character: uint32(col)},
+	}
+
+	// Build substitution map for resolved values
+	subMap := buildSubstitutionMap(content)
+
+	dotIdx := strings.IndexByte(expr, '.')
+	if dotIdx < 0 {
+		// No dot — return namespace completions, filtered by partial input
+		return templateNamespaceCompletions(expr, subMap, editRange)
+	}
+
+	// Has dot — return keys within the namespace
+	namespace := expr[:dotIdx]
+	partial := expr[dotIdx+1:]
+	return templateKeyCompletions(namespace, partial, subMap, editRange)
+}
+
+// templateNamespaceCompletions returns completions for top-level namespaces.
+func templateNamespaceCompletions(partial string, subMap map[string]string, editRange protocol.Range) []protocol.CompletionItem {
+	var items []protocol.CompletionItem
+	for _, ns := range templateNamespaces {
+		if partial != "" && !strings.HasPrefix(ns, partial) {
+			continue
+		}
+		items = append(items, protocol.CompletionItem{
+			Label:  ns,
+			Kind:   protocol.CompletionItemKindVariable,
+			Detail: "Template namespace",
+			TextEdit: &protocol.TextEdit{
+				Range:   editRange,
+				NewText: ns,
+			},
+		})
+	}
+	return items
+}
+
+// templateKeyCompletions returns completions for keys within a namespace.
+// Keys are derived from the substitution map (which uses build.NewSubstitutionMap
+// under the hood), with builtinVarDescriptions providing optional descriptions.
+func templateKeyCompletions(namespace, partial string, subMap map[string]string, editRange protocol.Range) []protocol.CompletionItem {
+	if subMap == nil {
+		return nil
+	}
+
+	prefix := namespace + "."
+
+	var items []protocol.CompletionItem
+	for fullKey, resolved := range subMap {
+		if !strings.HasPrefix(fullKey, prefix) {
+			continue
+		}
+		key := fullKey[len(prefix):]
+		if partial != "" && !strings.HasPrefix(key, partial) {
+			continue
+		}
+
+		detail := builtinVarDescriptions[fullKey]
+		if resolved != "" {
+			if detail != "" {
+				detail += " — " + resolved
+			} else {
+				detail = resolved
+			}
+		}
+
+		items = append(items, protocol.CompletionItem{
+			Label:  key,
+			Kind:   protocol.CompletionItemKindVariable,
+			Detail: detail,
+			TextEdit: &protocol.TextEdit{
+				Range:   editRange,
+				NewText: namespace + "." + key,
+			},
+		})
+	}
+	return items
 }

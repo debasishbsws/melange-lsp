@@ -27,8 +27,9 @@ var builtinVarDescriptions = map[string]string{
 	"package.version":     "The package version",
 	"package.epoch":       "The package epoch (version bump counter)",
 	"package.full-version": "The full version string (version-repoch)",
-	"package.description": "The package description",
+	"package.srcdir": "The package source directory",
 
+	"targets.outdir":     "The output directory",
 	"targets.contextdir": "The build context directory",
 	"targets.destdir":    "The package install destination directory",
 
@@ -40,11 +41,12 @@ var builtinVarDescriptions = map[string]string{
 
 	"cross.triplet.gnu.glibc":  "The GNU glibc cross-compilation triplet",
 	"cross.triplet.gnu.musl":   "The GNU musl cross-compilation triplet",
-	"cross.triplet.rust":       "The Rust cross-compilation triplet",
+	"cross.triplet.rust.glibc": "The Rust glibc cross-compilation triplet",
+	"cross.triplet.rust.musl":  "The Rust musl cross-compilation triplet",
 
 	"subpkg.name": "The subpackage name",
 
-	"context.os": "The build OS (e.g. linux)",
+	"context.name": "The name of the current context (package or subpackage)",
 }
 
 // getHover returns hover information for the given document content and position.
@@ -520,7 +522,17 @@ func buildSubstitutionMap(content string) map[string]string {
 		arch := apko_types.ParseArchitecture(runtime.GOARCH)
 		sm, err := build.NewSubstitutionMap(cfg, arch, "gnu", nil)
 		if err == nil {
-			return cleanSubstitutionKeys(sm.Substitutions)
+			result := cleanSubstitutionKeys(sm.Substitutions)
+			// Merge subpackage-specific keys (subpkg.name, targets.subpkgdir)
+			for i := range cfg.Subpackages {
+				subSm := sm.Subpackage(&cfg.Subpackages[i])
+				for k, v := range cleanSubstitutionKeys(subSm.Substitutions) {
+					if _, exists := result[k]; !exists {
+						result[k] = v
+					}
+				}
+			}
+			return result
 		}
 		// Fall back to manual extraction if NewSubstitutionMap fails
 		return extractSubstitutions(cfg)
@@ -592,6 +604,13 @@ func extractSubstitutions(cfg *config.Configuration) map[string]string {
 	// Add user-defined vars
 	for k, v := range cfg.Vars {
 		configMap[fmt.Sprintf("${{vars.%s}}", k)] = v
+	}
+
+	// Add subpackage keys if any subpackages exist
+	for _, subpkg := range cfg.Subpackages {
+		if _, exists := configMap["${{subpkg.name}}"]; !exists {
+			configMap["${{subpkg.name}}"] = subpkg.Name
+		}
 	}
 
 	// Apply var-transforms (resolves from: ${{package.version}} etc.)
@@ -824,6 +843,10 @@ func getKeyValueHover(line string, col int, content string, lines []string, line
 					}
 					sort.Strings(keys)
 
+					// Find raw subpackage name template (before range expansion)
+					// so subpkg.name resolves correctly per iteration.
+					rawSubpkgName := findEnclosingSubpackageName(lines, lineIdx)
+
 					var items []string
 					for _, k := range keys {
 						// Build a per-item subMap with range.key and range.value
@@ -833,6 +856,14 @@ func getKeyValueHover(line string, col int, content string, lines []string, line
 						}
 						localMap["range.key"] = k
 						localMap["range.value"] = d.Items[k]
+
+						// Re-resolve subpkg.name and context.name with range vars
+						if rawSubpkgName != "" {
+							resolved := resolveTemplateString(rawSubpkgName, localMap)
+							localMap["subpkg.name"] = resolved
+							localMap["context.name"] = resolved
+						}
+
 						resolved := resolveTemplateString(rawValue, localMap)
 						items = append(items, formatResolvedItem(resolved))
 					}
@@ -939,6 +970,33 @@ func getValueHover(line string, col int, content string, lines []string, lineIdx
 		return formatResolvedHover(label, resolved)
 	}
 	return fmt.Sprintf("**`%s`**\n\nResolved value", resolved)
+}
+
+// findEnclosingSubpackageName walks backwards from lineIdx to find the raw
+// "name:" value of the enclosing subpackage. This returns the unresolved
+// template (e.g., "py${{range.key}}-librosa") so that range-aware hover
+// can resolve subpkg.name per iteration.
+func findEnclosingSubpackageName(lines []string, lineIdx int) string {
+	// Walk backwards to find "name:" at the subpackage list item level.
+	// We look for "- name:" or "name:" preceded by a subpackages: block.
+	for i := lineIdx; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "- name:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "- name:"))
+		}
+		if strings.HasPrefix(trimmed, "name:") {
+			indent := getIndentation(lines[i])
+			// Make sure this is inside a subpackages block (indent > 0)
+			if indent > 0 {
+				return strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+			}
+		}
+		// Stop if we hit a top-level key (indent 0, has colon)
+		if getIndentation(lines[i]) == 0 && strings.Contains(trimmed, ":") {
+			break
+		}
+	}
+	return ""
 }
 
 // findEnclosingRange walks backwards from lineIdx to find a "range:" directive.
