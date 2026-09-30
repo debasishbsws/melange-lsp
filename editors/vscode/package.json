@@ -1,0 +1,108 @@
+{
+  "name": "melange",
+  "displayName": "melange",
+  "description": "Language server for melange package and pipeline YAML: diagnostics, completion, hover, navigation, and agent notes that stay folded.",
+  "version": "0.1.0",
+  "publisher": "debasishbsws",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/debasishbsws/melange-lsp"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "melange",
+    "wolfi",
+    "chainguard",
+    "apk",
+    "yaml"
+  ],
+  "activationEvents": [
+    "onLanguage:yaml"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "melange.foldAgentNotes",
+        "title": "Fold Agent Notes",
+        "category": "Melange"
+      },
+      {
+        "command": "melange.unfoldAgentNotes",
+        "title": "Unfold Agent Notes",
+        "category": "Melange"
+      },
+      {
+        "command": "melange.toggleAgentNotes",
+        "title": "Toggle Agent Notes",
+        "category": "Melange"
+      },
+      {
+        "command": "melange.restartServer",
+        "title": "Restart Language Server",
+        "category": "Melange"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "melange.toggleAgentNotes",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "when": "editorLangId == yaml"
+      }
+    ],
+    "configuration": {
+      "title": "melange",
+      "properties": {
+        "melange.server.path": {
+          "type": "string",
+          "default": "melange-lsp",
+          "description": "Path to the melange-lsp binary. By default it is looked up on PATH."
+        },
+        "melange.pipelineDirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra pipeline directories searched before the ones found from the nearest Makefile. Relative paths are resolved against the workspace root."
+        },
+        "melange.inlayHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show what lines using ${{...}} variables resolve to."
+        },
+        "melange.agentNotes.foldOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fold @agent notes every time a melange file is opened."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --sourcemap",
+    "check": "tsc --noEmit",
+    "package": "npm run check && npm run build:prod && vsce package --no-dependencies",
+    "test": "npm run build && node test/run.js",
+    "build:prod": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --minify"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "@types/vscode": "~1.91.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "~5.9.3"
+  }
+}

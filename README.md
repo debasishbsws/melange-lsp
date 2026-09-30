@@ -111,11 +111,6 @@ needed for agent notes to fold:
 
 ```json
 {
-  "lsp": {
-    "melange-lsp": {
-      "binary": { "path": "melange-lsp" }
-    }
-  },
   "languages": {
     "YAML": {
       "language_servers": ["melange-lsp", "..."],
@@ -125,7 +120,33 @@ needed for agent notes to fold:
 }
 ```
 
-A Zed extension that does this is planned.
+The Zed extension in `editors/zed` registers the server; install it with
+`make zed-install`.
+
+Inlay hints use the theme's hint style, which in many themes looks like a
+comment. To change it for any theme, set the color and choose `"italic"` or
+`"normal"`:
+
+```json
+{
+  "experimental.theme_overrides": {
+    "syntax": { "hint": { "color": "#74c7ec", "font_style": "normal" } }
+  }
+}
+```
+
+### VS Code
+
+The extension in `editors/vscode` starts the server for YAML files and folds
+`@agent` notes every time a file opens (`melange.agentNotes.foldOnOpen`).
+**Melange: Toggle Agent Notes** (`cmd-alt-n`) folds or unfolds them. Build
+and install it with:
+
+```bash
+make vscode-install
+```
+
+`cd editors/vscode && npm test` runs its integration tests inside VS Code.
 
 ### Neovim
 
