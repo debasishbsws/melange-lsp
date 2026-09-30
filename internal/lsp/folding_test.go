@@ -88,8 +88,8 @@ package:
 	}
 
 	// A one-liner directly followed by a fence merges into one fold.
-	if a := agent[0]; a.StartLine != 4 || a.EndLine != 7 || a.CollapsedText != "🤖 2 agent notes" {
-		t.Errorf("fold 0 = %d-%d %q, want 4-7 %q", a.StartLine, a.EndLine, a.CollapsedText, "🤖 2 agent notes")
+	if a := agent[0]; a.StartLine != 4 || a.EndLine != 7 || a.CollapsedText != "🤖 NOTE: first (+1 more)" {
+		t.Errorf("fold 0 = %d-%d %q, want 4-7 %q", a.StartLine, a.EndLine, a.CollapsedText, "🤖 NOTE: first (+1 more)")
 	}
 	if a := agent[0]; a.StartCharacter == nil || *a.StartCharacter != 2 {
 		t.Errorf("fold 0 should start at the '#' (character 2), got %v", a.StartCharacter)

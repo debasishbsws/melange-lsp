@@ -34,9 +34,9 @@ func TestParseAgentNotes(t *testing.T) {
 			"  name: foo\n",
 		want: []AgentNote{{StartLine: 1, EndLine: 4, Indent: 2, Fenced: true, Terminated: true, Text: "line one\n  indented"}},
 	}, {
-		name:    "fenced with colon and info string",
-		content: "# @agent: ```md\n# body\n# ```\n",
-		want:    []AgentNote{{StartLine: 0, EndLine: 2, Fenced: true, Terminated: true, Text: "body"}},
+		name:    "fenced with colon and heading",
+		content: "# @agent: Keep the patch ```\n# body\n# ```\n",
+		want:    []AgentNote{{StartLine: 0, EndLine: 2, Fenced: true, Terminated: true, Heading: "Keep the patch", Text: "body"}},
 	}, {
 		name:    "unterminated fence stops at first non-comment",
 		content: "# @agent ```\n# body\nname: foo\n# ```\n",
@@ -89,5 +89,45 @@ func TestAgentNoteDiagnostics(t *testing.T) {
 	}
 	if diags[1].Range.Start.Line != 2 || !strings.Contains(diags[1].Message, "unterminated") {
 		t.Errorf("diag 1 = line %d %q, want unterminated on line 2", diags[1].Range.Start.Line, diags[1].Message)
+	}
+}
+
+func TestAgentNoteTitleAndHover(t *testing.T) {
+	long := "Keep the fix-cflags patch until upstream merges the pull request that fixes optimisation flags"
+	content := "package:\n" +
+		"  # @agent " + long + " ```\n" +
+		"  # Details for agents.\n" +
+		"  # ```\n" +
+		"  name: x\n" +
+		"# @agent: first one-liner with several words in it\n" +
+		"# @agent: second\n"
+	d := document.New("file:///x.yaml", 1, content)
+
+	var labels []string
+	for _, f := range agentNoteFoldingRanges(d.Lines, parseAgentNotes(d.Text)) {
+		labels = append(labels, f.CollapsedText)
+	}
+	if len(labels) != 2 {
+		t.Fatalf("labels = %q", labels)
+	}
+	if !strings.HasPrefix(labels[0], "🤖 NOTE: Keep the fix-cflags patch") || !strings.HasSuffix(labels[0], "…") || len([]rune(labels[0])) > 70 {
+		t.Errorf("heading label = %q", labels[0])
+	}
+	if labels[1] != "🤖 NOTE: first one-liner with several words in it (+1 more)" {
+		t.Errorf("one-liner group label = %q", labels[1])
+	}
+
+	md, r := agentNoteHover(d, 2)
+	if !strings.Contains(md, "**"+long+"**") || !strings.Contains(md, "Details for agents.") || r.Start.Line != 1 || r.End.Line != 3 {
+		t.Errorf("hover = %q %v", md, r)
+	}
+	if md, _ := agentNoteHover(d, 6); !strings.Contains(md, "- first one-liner with several words in it\n- second\n") {
+		t.Errorf("one-liner group hover should be a bullet list, got %q", md)
+	}
+	if md, _ := agentNoteHover(d, 4); md != "" {
+		t.Errorf("no hover outside notes, got %q", md)
+	}
+	if got := truncateWords("a b c d e f", 5); got != "a b…" {
+		t.Errorf("truncateWords = %q", got)
 	}
 }

@@ -35,6 +35,9 @@ func (h hoverer) at(pos protocol.Position) (string, *protocol.Range) {
 		r := t.Range
 		return h.variable(t), &r
 	}
+	if md, r := agentNoteHover(h.doc, int(pos.Line)); md != "" {
+		return md, r
+	}
 	loc := h.doc.Locate(pos)
 	if loc == nil {
 		return "", nil
@@ -145,10 +148,10 @@ func (h hoverer) uses(s *model.Step) string {
 			continue
 		}
 		resolved := sm.Resolve(val, sc)
-		rows = append(rows, fmt.Sprintf("| `%s` | `%s` | %s |", in.Name, strings.ReplaceAll(truncate(resolved, 80), "|", `\|`), src))
+		rows = append(rows, fmt.Sprintf("- `%s`: `%s` (%s)", in.Name, strings.ReplaceAll(truncate(resolved, 80), "`", "'"), src))
 	}
 	if len(rows) > 0 {
-		b.WriteString("\n\n**This step**\n\n| input | value | from |\n|---|---|---|\n")
+		b.WriteString("\n\n**This step:**\n\n")
 		b.WriteString(strings.Join(rows, "\n"))
 	}
 	return b.String()
@@ -234,9 +237,9 @@ func (h hoverer) dataSet(name string) string {
 		return fmt.Sprintf("Data set `%s` is not defined.", name)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "**%s** — %d items\n\n| key | value |\n|---|---|\n", name, len(h.model.Data[name]))
+	fmt.Fprintf(&b, "**%s** — %d items\n\n", name, len(h.model.Data[name]))
 	document.Entries(document.MapValue(set, "items"), func(k, v *yaml.Node) {
-		fmt.Fprintf(&b, "| `%s` | %s |\n", k.Value, strings.ReplaceAll(truncate(v.Value, 80), "|", `\|`))
+		fmt.Fprintf(&b, "- `%s`: %s\n", k.Value, truncate(v.Value, 80))
 	})
 	return b.String()
 }

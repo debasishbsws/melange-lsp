@@ -467,7 +467,7 @@ func (c *completer) agentNotes() {
 	one.Documentation = markdown("A comment addressed to AI agents. Editors using melange-lsp can fold it away. See `docs/agent-notes.md`.")
 	c.add(one)
 
-	block := snippet("@agent ```", protocol.CompletionItemKindSnippet, r, "@agent ```\n"+indent+"# ${0}\n"+indent+"# ```")
+	block := snippet("@agent ```", protocol.CompletionItemKindSnippet, r, "@agent ${1:heading} ```\n"+indent+"# ${0}\n"+indent+"# ```")
 	block.Detail = "multi-line note for AI agents"
 	block.FilterText = "@agent"
 	c.add(block)
@@ -579,18 +579,19 @@ func pipelineDoc(def *pipeline.Def) string {
 	}
 	b.WriteString("\n\n")
 	if ins := def.Inputs(); len(ins) > 0 {
-		b.WriteString("| input | | default | description |\n|---|---|---|---|\n")
+		b.WriteString("Inputs:\n\n")
 		for _, in := range ins {
-			req := ""
-			if in.Required {
-				req = "required"
+			fmt.Fprintf(&b, "- `%s`", in.Name)
+			switch {
+			case in.Required && (in.Default == nil || in.Default.Value == ""):
+				b.WriteString(" (required)")
+			case in.Default != nil && in.Default.Value != "":
+				fmt.Fprintf(&b, " = `%s`", strings.ReplaceAll(truncate(in.Default.Value, 40), "`", "'"))
 			}
-			d := ""
-			if in.Default != nil {
-				d = "`" + strings.ReplaceAll(truncate(in.Default.Value, 40), "|", `\|`) + "`"
+			if desc := strings.Join(strings.Fields(in.Description), " "); desc != "" {
+				b.WriteString(" — " + truncate(desc, 160))
 			}
-			desc := strings.ReplaceAll(strings.ReplaceAll(in.Description, "\n", " "), "|", `\|`)
-			fmt.Fprintf(&b, "| `%s` | %s | %s | %s |\n", in.Name, req, d, truncate(desc, 160))
+			b.WriteString("\n")
 		}
 		b.WriteString("\n")
 	} else {

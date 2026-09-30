@@ -287,7 +287,7 @@ func TestHover(t *testing.T) {
 	tests := []struct{ name, text, want string }{
 		{"template value", header + "pipeline:\n  - runs: echo ${{package.ver§sion}}\n", "`1.2.3`"},
 		{"var definition", header + "vars:\n  foo: bar\npipeline:\n  - runs: echo ${{vars.f§oo}}\n", "vars:"},
-		{"uses docs and effective inputs", header + "pipeline:\n  - uses: local/gr§eet\n    with:\n      who: ${{package.name}}\n", "| `who` | `hello` | with |"},
+		{"uses docs and effective inputs", header + "pipeline:\n  - uses: local/gr§eet\n    with:\n      who: ${{package.name}}\n", "- `who`: `hello` (with)"},
 		{"input", header + "pipeline:\n  - uses: local/greet\n    with:\n      wh§o: x\n", "Who to greet"},
 		{"schema key", header + "update:\n  enab§led: true\n", "enabled"},
 		{"epoch convention", "package:\n  name: x\n  ep§och: 0\n", "Increment by one"},
@@ -387,9 +387,29 @@ func TestLinksAndHints(t *testing.T) {
 			t.Errorf("missing link %s in %v", w, targets)
 		}
 	}
+	// One hint per line, with the whole value resolved.
 	hints := InlayHints(snap, protocol.Range{End: protocol.Position{Line: 100}})
-	if len(hints) != 2 || hints[0].Label != "= hello" || hints[1].Label != "= 1.2.3" {
+	if len(hints) != 1 || hints[0].Label != "= https://example.com/hello-1.2.3.tgz" {
 		t.Errorf("hints = %+v", hints)
+	}
+
+	// Inside a script, each line that uses a variable shows the resolved line.
+	snap, _ = open(t, root, "hello.yaml", header+"pipeline:\n  - runs: |\n      mkdir -p \"${{targets.destdir}}\"/usr/bin\n      echo plain\n      for b in go; do install bin/$b \"${{targets.destdir}}\"/usr/bin/$b; done\n")
+	hints = InlayHints(snap, protocol.Range{End: protocol.Position{Line: 100}})
+	want := []string{
+		`= mkdir -p "/home/build/melange-out/hello"/usr/bin`,
+		`= for b in go; do install bin/$b "/home/build/melange-out/hello"/usr/bin/$b; done`,
+	}
+	if len(hints) != len(want) {
+		t.Fatalf("script hints = %+v", hints)
+	}
+	for i, w := range want {
+		if hints[i].Label != w {
+			t.Errorf("hint %d = %q, want %q", i, hints[i].Label, w)
+		}
+	}
+	if hints[0].Position != snap.Doc.LineEnd(int(hints[0].Position.Line)) {
+		t.Errorf("script hint should sit at the end of the line: %+v", hints[0].Position)
 	}
 }
 
@@ -517,11 +537,11 @@ update:
 
 	// Hovering the to: name shows the computation.
 	h := Hover(snap, protocol.Position{Line: 11, Character: 9})
-	if h == nil || !strings.Contains(h.Contents.Value, "`${{vars.major-minor}}` = `1.2`") || !strings.Contains(h.Contents.Value, "| from | `1.2.3` |") {
+	if h == nil || !strings.Contains(h.Contents.Value, "`${{vars.major-minor}}` = `1.2`") || !strings.Contains(h.Contents.Value, "from     1.2.3") {
 		t.Errorf("to: hover = %v", h)
 	}
 	h = Hover(snap, protocol.Position{Line: 13, Character: 12})
-	if h == nil || !strings.Contains(h.Contents.Value, "**no match**") {
+	if h == nil || !strings.Contains(h.Contents.Value, "no match") {
 		t.Errorf("non-matching transform hover = %v", h)
 	}
 
@@ -552,5 +572,36 @@ func TestUpdateReconstruction(t *testing.T) {
 	u := traceUpdate(snap)
 	if u == nil || u.Actual || u.Input != "release/v1.2.3" || !u.Matches() {
 		t.Errorf("trace = %+v", u)
+	}
+}
+
+func TestInvertTransform(t *testing.T) {
+	tests := []struct{ match, replace, out, want string }{
+		{`^(\d+)[-~+]deb(\d+)u(\d+).(\d+)$`, `${1}.${2}.${3}.${4}`, "20250419.12.1.1", "20250419+deb12u1.1"},
+		{`^(\d+)\.(\d+)_p(\d+)$`, `$1.$2.$3`, "2.1.20250117", "2.1_p20250117"},
+		{`_`, `.`, "1.2.3", "1_2_3"},
+		{`^v?(.*)$`, `$1`, "1.2.3", "1.2.3"},
+	}
+	for _, tt := range tests {
+		got, ok := invertTransform(tt.match, tt.replace, tt.out)
+		if !ok || got != tt.want {
+			t.Errorf("invert(%q, %q, %q) = %q, %v; want %q", tt.match, tt.replace, tt.out, got, ok, tt.want)
+		}
+	}
+	if _, ok := invertTransform(`(a|b)+`, `$1`, "x"); ok {
+		t.Error("complex patterns should not invert")
+	}
+
+	root := workspace(t, nil)
+	snap, _ := open(t, root, "hello.yaml", strings.Replace(header, `version: "1.2.3"`, `version: "20250419.12.1.1"`, 1)+
+		"update:\n  enabled: true\n  release-monitor:\n    identifier: 1234\n  version-transform:\n    - match: ^(\\d+)[-~+]deb(\\d+)u(\\d+).(\\d+)$\n      replace: ${1}.${2}.${3}.${4}\n")
+	u := traceUpdate(snap)
+	if u == nil || u.Input != "20250419+deb12u1.1" || !u.Matches() {
+		t.Errorf("trace = %+v", u)
+	}
+	// A transform the reconstruction cannot undo must not claim a match.
+	snap, _ = open(t, root, "hello.yaml", header+"update:\n  enabled: true\n  release-monitor:\n    identifier: 1\n  version-transform:\n    - match: ^(x+|y+)z$\n      replace: $1\n")
+	if u := traceUpdate(snap); u == nil || u.Matches() || !u.Guess() {
+		t.Errorf("unreliable trace = %+v", u)
 	}
 }

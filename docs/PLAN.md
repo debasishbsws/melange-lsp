@@ -12,12 +12,13 @@
   code actions, semantic tokens, folding.
 - Agent notes (`docs/agent-notes.md`).
 - Claude Code plugin manifest.
+- Zed extension (`editors/zed`) and VS Code extension (`editors/vscode`,
+  which also folds agent notes on open and toggles them).
 
 ## Next
 
-- Editor extensions: a Zed extension that registers the server and enables
-  LSP folding ranges, and a VS Code extension with a "Toggle agent notes"
-  command.
+- Publish the Zed and VS Code extensions (both work locally from
+  `editors/`).
 - Zed: an upstream change so comment folding ranges can be folded as a
   group (Zed drops `FoldingRangeKind` today).
 - Formatting that matches `yam` (`.yam.yaml`), so edits keep stereo's style.

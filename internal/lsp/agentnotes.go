@@ -19,10 +19,11 @@ import (
 //	# @agent: upstream tags releases as vX.Y.Z-final
 //	# @agent upstream tags releases as vX.Y.Z-final
 //
-// Multi-line, fenced with backticks and closed by a bare "# ```" line:
+// Multi-line: a line ending in ``` opens the note and a bare "# ```" line
+// closes it. Text between @agent and the fence is an optional heading:
 //
-//	# @agent ```
-//	# The CVE-2026-1234 patch is required until 1.5.0.
+//	# @agent Keep the CVE-2026-1234 patch ```
+//	# The patch is required until 1.5.0.
 //	# ```
 var (
 	agentNoteStart = regexp.MustCompile(`^(\s*)#\s*@agent\b:?\s*(.*)$`)
@@ -42,8 +43,32 @@ type AgentNote struct {
 	Fenced bool
 	// Terminated is false for a fenced note missing its closing fence.
 	Terminated bool
+	// Heading is the text between @agent and the opening fence.
+	Heading string
 	// Text is the note body with comment markers and fences removed.
 	Text string
+}
+
+// Title is how a note is labelled when folded: its heading, else its
+// first non-empty line.
+func (n AgentNote) Title() string {
+	if n.Heading != "" {
+		return n.Heading
+	}
+	for _, l := range strings.Split(n.Text, "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// Markdown renders the note for hovers.
+func (n AgentNote) Markdown() string {
+	if n.Heading != "" {
+		return "**" + n.Heading + "**\n\n" + n.Text
+	}
+	return n.Text
 }
 
 // parseAgentNotes scans content line by line for agent notes. It matches
@@ -66,15 +91,15 @@ func parseAgentNotes(content string) []AgentNote {
 			Terminated: true,
 		}
 
-		if !strings.HasPrefix(rest, agentFence) {
+		// A line ending in the fence opens a multi-line note; any text
+		// between @agent and the fence is its heading.
+		if !strings.HasSuffix(rest, agentFence) {
 			note.Text = rest
 			notes = append(notes, note)
 			continue
 		}
-
-		// Fenced note: anything after the opening fence on the same line is
-		// treated as an info string and ignored, like Markdown.
 		note.Fenced = true
+		note.Heading = strings.TrimSpace(strings.TrimSuffix(rest, agentFence))
 		note.Terminated = false
 		var body []string
 		j := i + 1
@@ -144,7 +169,7 @@ func agentNoteDiagnostics(d *document.Document) []protocol.Diagnostic {
 		switch {
 		case n.Fenced && !n.Terminated:
 			msg = "unterminated @agent block: close it with a \"# ```\" line"
-		case strings.TrimSpace(n.Text) == "":
+		case strings.TrimSpace(n.Text) == "" && n.Heading == "":
 			msg = "empty @agent note"
 		default:
 			continue
@@ -165,4 +190,60 @@ func agentNoteDiagnostics(d *document.Document) []protocol.Diagnostic {
 
 func utf16Len(s string) int {
 	return len(utf16.Encode([]rune(s)))
+}
+
+// noteTitleWidth is how much of a note's title a fold shows.
+const noteTitleWidth = 60
+
+// truncateWords shortens s to at most n characters, cutting at a word
+// boundary and adding an ellipsis.
+func truncateWords(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := string(r[:n])
+	if i := strings.LastIndexByte(cut, ' '); i > n/2 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,.;:") + "…"
+}
+
+// agentNoteGroups splits notes into runs of adjacent notes, which fold and
+// hover together.
+func agentNoteGroups(notes []AgentNote) [][]AgentNote {
+	var groups [][]AgentNote
+	for i := 0; i < len(notes); {
+		j := i + 1
+		for j < len(notes) && notes[j].StartLine == notes[j-1].EndLine+1 {
+			j++
+		}
+		groups = append(groups, notes[i:j])
+		i = j
+	}
+	return groups
+}
+
+// agentNoteHover shows the full note(s) at line, so a folded note can be
+// read without opening it.
+func agentNoteHover(d *document.Document, line int) (string, *protocol.Range) {
+	for _, g := range agentNoteGroups(parseAgentNotes(d.Text)) {
+		first, last := g[0], g[len(g)-1]
+		if line < first.StartLine || line > last.EndLine {
+			continue
+		}
+		r := protocol.Range{Start: protocol.Position{Line: uint32(first.StartLine), Character: uint32(first.Indent)}, End: d.LineEnd(last.EndLine)}
+		if len(g) == 1 {
+			return "🤖 **Agent note**\n\n" + first.Markdown(), &r
+		}
+		// Several adjacent notes read as a list.
+		var b strings.Builder
+		b.WriteString("🤖 **Agent notes**\n\n")
+		for _, n := range g {
+			b.WriteString("- " + strings.ReplaceAll(strings.TrimSpace(n.Markdown()), "\n", "\n  ") + "\n")
+		}
+		return b.String(), &r
+	}
+	return "", nil
 }

@@ -74,7 +74,7 @@ func TestEndToEnd(t *testing.T) {
 	call("textDocument/foldingRange", map[string]any{"textDocument": map[string]any{"uri": uri}}, &folds)
 	found := false
 	for _, f := range folds {
-		if f.CollapsedText == "🤖 agent note" && f.StartLine == 7 && f.EndLine == 9 {
+		if f.CollapsedText == "🤖 NOTE: keep the greet step" && f.StartLine == 7 && f.EndLine == 9 {
 			found = true
 		}
 	}

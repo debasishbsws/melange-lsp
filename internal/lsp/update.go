@@ -58,17 +58,20 @@ func (t *transformTrace) markdown() string {
 		fmt.Fprintf(&b, "`match` is not a valid regular expression: %v", t.Err)
 		return b.String()
 	}
-	b.WriteString("| step | value |\n|---|---|\n")
-	fmt.Fprintf(&b, "| from | `%s` |\n", t.From)
-	fmt.Fprintf(&b, "| match `%s` | %s |\n", mdCell(t.Match), map[bool]string{true: "matches", false: "**no match**"}[t.Matched])
-	fmt.Fprintf(&b, "| replace `%s` | `%s` |\n", mdCell(t.Replace), t.Result)
+	matched := "matches"
 	if !t.Matched {
-		b.WriteString("\nThe pattern does not match, so the variable is `from` unchanged.")
+		matched = "no match"
+	}
+	b.WriteString(aligned([][]string{
+		{"from", t.From, ""},
+		{"match", t.Match, matched},
+		{"replace", t.Replace, "→ " + t.Result},
+	}))
+	if !t.Matched {
+		b.WriteString("The pattern does not match, so the variable is `from` unchanged.")
 	}
 	return b.String()
 }
-
-func mdCell(s string) string { return strings.ReplaceAll(s, "|", `\|`) }
 
 // updateTrace explains how the updater turns an upstream tag or release
 // into a package version, following Chainguard's updater: tag filters,
@@ -94,7 +97,22 @@ type updateTrace struct {
 	filtered bool
 }
 
-func (u *updateTrace) Matches() bool { return u.Skipped == "" && u.Result == u.Version }
+func (u *updateTrace) Matches() bool { return u.Skipped == "" && u.Result == u.Version && !u.Guess() }
+
+// Guess reports a reconstruction the trace cannot vouch for: some
+// version-transform did not match the reconstructed input, so the result
+// equals package.version only because nothing was changed.
+func (u *updateTrace) Guess() bool {
+	if u.Actual {
+		return false
+	}
+	for _, s := range u.Steps {
+		if strings.HasPrefix(s.Label, "version-transform") && strings.HasSuffix(s.Note, "no match") {
+			return true
+		}
+	}
+	return false
+}
 
 type monitorSpec struct {
 	name                                 string
@@ -252,12 +270,12 @@ func (u *updateTrace) run(update *yaml.Node, mon *monitorSpec, sep string, trans
 			step(fmt.Sprintf("version-transform[%d]", i), v, "invalid regex")
 			continue
 		}
-		note := ""
+		note := fmt.Sprintf("s/%s/%s/", t.match, t.replace)
 		if !re.MatchString(v) {
-			note = "no match"
+			note += "  no match"
 		}
 		v = re.ReplaceAllString(v, t.replace)
-		step(fmt.Sprintf("version-transform[%d] s/%s/%s/", i, t.match, t.replace), v, note)
+		step(fmt.Sprintf("version-transform[%d]", i), v, note)
 	}
 	u.Result = v
 }
@@ -308,9 +326,8 @@ func sameRepo(url, identifier string) bool {
 func reconstructTag(version string, mon *monitorSpec, sep string, transforms []versionTransform) string {
 	v := version
 	for i := len(transforms) - 1; i >= 0; i-- {
-		t := transforms[i]
-		if regexp.QuoteMeta(t.match) == t.match && !strings.Contains(t.replace, "$") && t.replace != "" {
-			v = strings.ReplaceAll(v, t.replace, t.match)
+		if in, ok := invertTransform(transforms[i].match, transforms[i].replace, v); ok {
+			v = in
 		}
 	}
 	if sep != "" {
@@ -332,6 +349,8 @@ func reconstructTag(version string, mon *monitorSpec, sep string, transforms []v
 func (u *updateTrace) markdown() string {
 	var b strings.Builder
 	switch {
+	case u.Guess():
+		fmt.Fprintf(&b, "**Update check (%s):** the upstream version could not be worked out from `package.version` `%s`\n\n", u.Monitor, u.Version)
 	case u.Skipped != "":
 		fmt.Fprintf(&b, "**Update check (%s):** `%s` is skipped\n\n", u.Monitor, u.Input)
 	case u.Matches():
@@ -342,25 +361,31 @@ func (u *updateTrace) markdown() string {
 	if u.BuildTag != "" {
 		fmt.Fprintf(&b, "The build checks out `%s`, which the tag filter excludes, so the monitor watches a different tag series. ", u.BuildTag)
 	}
-	fmt.Fprintf(&b, "Starting from %s.\n\n| step | value | |\n|---|---|---|\n| upstream | `%s` | |\n", u.Source, u.Input)
+	fmt.Fprintf(&b, "Starting from %s:\n\n", u.Source)
+	rows := [][]string{{"upstream", u.Input, ""}}
 	for _, s := range u.Steps {
-		fmt.Fprintf(&b, "| %s | `%s` | %s |\n", mdCell(s.Label), s.Value, s.Note)
+		rows = append(rows, []string{s.Label, "→ " + s.Value, s.Note})
 	}
+	b.WriteString(aligned(rows))
 	switch {
 	case u.Skipped != "":
 		b.WriteString("\n" + u.Skipped + ".")
 	case !u.Matches() && u.Actual:
 		b.WriteString("\nThe result differs from `package.version` as text. The updater compares versions semantically (for example `_p` patch levels and underscores), and the monitor may watch different tags than the build checks out, so this is not necessarily wrong.")
+	case u.Guess():
+		b.WriteString("\nA version-transform does not match this guess, so the trace only shows the settings, not a real upstream value.")
 	case !u.Matches():
 		b.WriteString("\nThe upstream tag could not be reconstructed exactly; the trace shows the stages applied to the guess.")
 	}
 	b.WriteString("\n\n_Stages follow Chainguard's updater: tag filters, strip-prefix/suffix, ignore-regex-patterns, version-separator, pre-release skipping, version-transform._")
-	return b.String()
+	return tidyBlankLines(b.String())
 }
 
 // updateLens is the one-line summary for a code lens on update:.
 func (u *updateTrace) lens() string {
 	switch {
+	case u.Guess():
+		return "update: upstream version unknown; hover for the settings trace"
 	case u.Skipped != "":
 		return fmt.Sprintf("update: upstream %s is skipped by the update settings", u.Input)
 	case u.Matches():
@@ -368,3 +393,34 @@ func (u *updateTrace) lens() string {
 	}
 	return fmt.Sprintf("update: upstream %s → %s (package.version is %s)", u.Input, u.Result, u.Version)
 }
+
+// aligned renders rows as a fenced block with padded columns, which looks
+// like a table in every editor's hover and in plain text.
+func aligned(rows [][]string) string {
+	widths := map[int]int{}
+	for _, r := range rows {
+		for i, c := range r {
+			if n := len([]rune(c)); n > widths[i] {
+				widths[i] = n
+			}
+		}
+	}
+	var b strings.Builder
+	b.WriteString("```text\n")
+	for _, r := range rows {
+		var line strings.Builder
+		for i, c := range r {
+			line.WriteString(c)
+			if i < len(r)-1 && widths[i+1] > 0 {
+				line.WriteString(strings.Repeat(" ", widths[i]-len([]rune(c))+2))
+			}
+		}
+		b.WriteString(strings.TrimRight(line.String(), " ") + "\n")
+	}
+	b.WriteString("```\n\n")
+	return b.String()
+}
+
+var blankRuns = regexp.MustCompile(`\n{3,}`)
+
+func tidyBlankLines(s string) string { return blankRuns.ReplaceAllString(s, "\n\n") }

@@ -46,21 +46,17 @@ func getFoldingRanges(d *document.Document) []FoldingRange {
 // clients cannot fold, so it is not reported.
 func agentNoteFoldingRanges(lines []string, notes []AgentNote) []FoldingRange {
 	var ranges []FoldingRange
-	for i := 0; i < len(notes); {
-		first, last := notes[i], notes[i]
-		count := 1
-		for i+count < len(notes) && notes[i+count].StartLine == last.EndLine+1 {
-			last = notes[i+count]
-			count++
-		}
-		i += count
-
+	for _, g := range agentNoteGroups(notes) {
+		first, last := g[0], g[len(g)-1]
 		if last.EndLine <= first.StartLine {
 			continue
 		}
-		label := "🤖 agent note"
-		if count > 1 {
-			label = fmt.Sprintf("🤖 %d agent notes", count)
+		label := "🤖 NOTE: " + truncateWords(first.Title(), noteTitleWidth)
+		if first.Title() == "" {
+			label = "🤖 NOTE"
+		}
+		if len(g) > 1 {
+			label += fmt.Sprintf(" (+%d more)", len(g)-1)
 		}
 		// Start the fold at the '#' rather than the end of the line so the
 		// whole note, including the "@agent" marker, is hidden.

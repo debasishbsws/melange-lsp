@@ -1,4 +1,4 @@
-# @agent ```
+# @agent Keep the fix-cflags patch until upstream PR 42 merges ```
 # Upstream tags releases as vX.Y.Z. Keep the fix-cflags patch until
 # upstream merges https://github.com/example/hello/pull/42, then drop it.
 # ```
@@ -6,6 +6,8 @@ package:
   name: hello
   version: "2.12.1"
   epoch: 0
+  # @agent bump the epoch for any change that keeps the version
+  # @agent: reset the epoch to 0 when the version changes
   description: GNU hello, a friendly greeter
   copyright:
     - license: GPL-3.0-or-later

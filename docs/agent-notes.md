@@ -17,11 +17,12 @@ One line:
 # @agent upstream tags releases as vX.Y.Z-final; strip the suffix
 ```
 
-Multiple lines, fenced with backticks like Markdown and closed by a bare
-`` # ``` `` line:
+Multiple lines: a line ending in three backticks opens the note, and a bare
+`` # ``` `` line closes it. Text between `@agent` and the backticks is an
+optional heading, shown when the note is folded:
 
 ```yaml
-# @agent ```
+# @agent Keep the CVE-2026-1234 patch until 1.5.0 ```
 # The CVE-2026-1234 patch is required until upstream ships 1.5.0.
 # On version bump:
 #   - check whether upstream merged PR #812
@@ -51,7 +52,10 @@ Rules:
 ## Editor behaviour
 
 melange-lsp returns each run of adjacent notes as one folding range of kind
-`comment` with `collapsedText` set to `🤖 agent note` (or `🤖 N agent notes`).
+`comment`. Folded, it shows `🤖 NOTE:` and the note's heading (or its first line)
+cut at a word boundary after 60 characters, plus `(+N more)` for runs of
+several notes. Hovering any line of a note shows the whole note rendered as
+Markdown, so it can be read without unfolding.
 It also returns structural YAML folds, because clients such as Zed use a
 server's folding ranges in place of their own.
 

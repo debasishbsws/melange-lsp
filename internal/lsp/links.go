@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"melange-lsp/internal/document"
+	"melange-lsp/internal/model"
 	"melange-lsp/internal/subst"
 
 	"go.lsp.dev/protocol"
@@ -84,8 +85,12 @@ type inlayHintParams struct {
 	Range        protocol.Range                  `json:"range"`
 }
 
-// InlayHints shows the value of each ${{...}} in single-line values. Block
-// scalars such as runs: are skipped to keep scripts readable.
+// hintWidth caps inlay hint labels; the tooltip has the full text.
+const hintWidth = 80
+
+// InlayHints shows, at the end of each line that uses variables, what
+// that line resolves to: the whole value for single-line values, and the
+// resolved script line inside block scalars such as runs:.
 func InlayHints(snap *Snapshot, r protocol.Range) []InlayHint {
 	out := []InlayHint{}
 	if !snap.opts.inlayHints() || snap.Doc.Kind != document.KindConfig {
@@ -93,25 +98,58 @@ func InlayHints(snap *Snapshot, r protocol.Range) []InlayHint {
 	}
 	d, m := snap.Doc, snap.Model
 	sm := snap.Subst()
+
+	// The first template on each line decides the node and scope.
+	done := map[uint32]bool{}
 	for _, t := range m.Templates {
-		if t.Range.Start.Line < r.Start.Line || t.Range.Start.Line > r.End.Line {
+		line := t.Range.Start.Line
+		if done[line] || line < r.Start.Line || line > r.End.Line {
 			continue
 		}
-		if n := d.NodeAtPath(t.Path); n != nil && n.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
-			continue
-		}
+		done[line] = true
 		if len(t.Path) > 0 && t.Path[0].Key == "var-transforms" {
-			continue // shown as a code lens
+			continue // explained by hover, the code lens, and the to: hint
 		}
-		v, ok := sm.Lookup(t.Expr, subst.Scope{Subpackage: t.Subpackage, Inputs: stepInputs(snap, t.Step)})
-		if !ok || v == "" || strings.HasPrefix(t.Expr, "range.") {
+		n := d.NodeAtPath(t.Path)
+		if n == nil {
+			continue
+		}
+		sc := subst.Scope{Subpackage: t.Subpackage, Inputs: stepInputs(snap, t.Step)}
+		resolve := func(s string) string {
+			// range.* differs per item, so it stays as written.
+			return model.TemplatePattern.ReplaceAllStringFunc(s, func(tpl string) string {
+				name := model.TemplatePattern.FindStringSubmatch(tpl)[1]
+				if strings.HasPrefix(name, "range.") {
+					return tpl
+				}
+				if v, ok := sm.Lookup(name, sc); ok {
+					return v
+				}
+				return tpl
+			})
+		}
+
+		nr := d.Range(n)
+		var raw string
+		var pos protocol.Position
+		switch {
+		case n.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 || nr.Start.Line != nr.End.Line:
+			// One script line at a time.
+			raw = strings.TrimSpace(d.Line(int(line)))
+			pos = d.LineEnd(int(line))
+		default:
+			raw = n.Value
+			pos = nr.End
+		}
+		resolved := resolve(raw)
+		if resolved == raw {
 			continue
 		}
 		out = append(out, InlayHint{
-			Position:    t.Range.End,
-			Label:       "= " + truncate(v, 40),
+			Position:    pos,
+			Label:       "= " + truncate(resolved, hintWidth),
 			PaddingLeft: true,
-			Tooltip:     fmt.Sprintf("${{%s}} = %s", t.Expr, v),
+			Tooltip:     resolved,
 		})
 	}
 	// Each var-transforms to: shows the value it produces.
