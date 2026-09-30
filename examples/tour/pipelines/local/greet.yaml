@@ -1,0 +1,17 @@
+name: Greet someone
+
+needs:
+  packages:
+    - busybox
+
+inputs:
+  who:
+    description: Who to greet.
+    required: true
+  greeting:
+    description: The greeting to use.
+    default: hello
+
+pipeline:
+  - runs: |
+      echo "${{inputs.greeting}}, ${{inputs.who}}!"

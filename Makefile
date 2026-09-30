@@ -1,10 +1,14 @@
-.PHONY: build install test test-go test-lsp lint fmt generate corpus clean
+.PHONY: build install zed-install test test-go test-lsp lint fmt generate corpus clean
 
 build:
 	go build -o melange-lsp ./cmd/melange-lsp
 
 install:
 	go install ./cmd/melange-lsp
+
+# Build and install the Zed extension (see editors/zed).
+zed-install: install
+	editors/zed/install.sh
 
 test-go:
 	go test ./... -race

@@ -1,0 +1,79 @@
+# @agent ```
+# Upstream tags releases as vX.Y.Z. Keep the fix-cflags patch until
+# upstream merges https://github.com/example/hello/pull/42, then drop it.
+# ```
+package:
+  name: hello
+  version: "2.12.1"
+  epoch: 0
+  description: GNU hello, a friendly greeter
+  copyright:
+    - license: GPL-3.0-or-later
+  checks:
+    disabled:
+      - usrloca
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+
+vars:
+  greeting: hi there
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.(\d+)\.\d+$
+    replace: $1.$2
+    to: major-minor
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://ftp.gnu.org/gnu/hello/hello-${{package.version}}.tar.gz
+      expected-sha256: 5a9a996dc292cc24dcf411cee87e92f6aae5b8d13bd9c6819b4c7a9dce0818ab
+
+  - uses: patch
+    with:
+      patches: fix-cflags.patch
+
+  - uses: autoconf/configure
+
+  - uses: autoconf/make
+
+  - uses: local/greet
+    with:
+      who: ${{vars.greeting}} from ${{package.name}} ${{vars.major-minor}}
+      gretting: howdy
+
+  - uses: local/greet
+
+  - uses: autoconf/make-instal
+
+  - runs: |
+      install -Dm644 README ${{targets.destdir}}/usr/share/doc/hello/README
+
+  - uses: strip
+
+subpackages:
+  - name: hello-doc
+    description: hello documentation
+    pipeline:
+      - uses: split/manpages
+      - runs: echo ${{vars.greting}} > ${{targets.subpkgdir}}/NOTE
+    test:
+      pipeline:
+        - runs: test -f /usr/share/man/man1/hello.1.gz
+
+update:
+  enabled: true
+  github:
+    identifier: example/hello
+    tag-filter: v
+    strip-prefix: v
+
+test:
+  pipeline:
+    - runs: |
+        hello --version

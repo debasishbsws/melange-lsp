@@ -1,0 +1,13 @@
+id = "melange"
+name = "melange"
+description = "Language server for melange package and pipeline YAML: diagnostics, completion, hover, navigation, and foldable @agent notes."
+version = "0.1.0"
+schema_version = 1
+authors = ["Debasish Biswas"]
+repository = "https://github.com/debasishbsws/melange-lsp"
+
+# Runs alongside Zed's YAML support. The server ignores YAML that is not a
+# melange package configuration or pipeline definition.
+[language_servers.melange-lsp]
+name = "melange-lsp"
+languages = ["YAML"]

@@ -1,0 +1,12 @@
+{
+  "languages": {
+    "YAML": {
+      "language_servers": ["melange-lsp", "..."],
+      "document_folding_ranges": "on",
+      "semantic_tokens": "combined",
+      "inlay_hints": { "enabled": true }
+    }
+  },
+  "code_lens": "on",
+  "lsp_document_links": true
+}
