@@ -1,204 +1,417 @@
+// Package pipeline finds and parses melange pipeline definitions: the
+// built-in ones embedded in melange and local ones in pipeline directories.
 package pipeline
 
 import (
-	"fmt"
+	"bytes"
 	"io/fs"
+	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"melange-lsp/internal/document"
+	"melange-lsp/internal/model"
+
+	"go.lsp.dev/protocol"
 	"gopkg.in/yaml.v3"
 )
 
-// InputInfo describes a single pipeline input parameter.
-type InputInfo struct {
-	Description string `yaml:"description"`
-	Required    bool   `yaml:"required"`
-	Default     string `yaml:"default"`
+// BuiltinDir is where melange's apk installs pipelines; melange searches
+// it after --pipeline-dirs and before its embedded copies.
+const BuiltinDir = "/usr/share/melange/pipelines"
+
+// Def is a parsed pipeline definition.
+type Def struct {
+	// Name is the uses: name, e.g. "go/build".
+	Name string
+	// Title is the pipeline's own name: field.
+	Title string
+	// File is the definition's path on disk. Built-ins are extracted to a
+	// cache directory so editors can open them.
+	File    string
+	Dir     string
+	Builtin bool
+
+	Doc   *document.Document
+	Model *model.Model
+	Needs []string
 }
 
-// PipelineInfo describes a parsed pipeline YAML file.
-type PipelineInfo struct {
-	Name   string               `yaml:"name"`
-	Inputs map[string]InputInfo `yaml:"inputs"`
-
-	// Raw is the full YAML source of the pipeline file.
-	Raw string `yaml:"-"`
+// Inputs returns the declared inputs in file order.
+func (d *Def) Inputs() []*model.Input {
+	var out []*model.Input
+	for _, n := range d.Model.InputOrder {
+		out = append(out, d.Model.Inputs[n])
+	}
+	return out
 }
 
-// Registry holds the embedded (built-in) pipeline filesystem and a cache for
-// parsed embedded pipelines. On-disk pipelines are resolved per-request via
-// dirs passed to each method.
+// Input returns the named input, or nil.
+func (d *Def) Input(name string) *model.Input {
+	return d.Model.Inputs[name]
+}
+
+// Location is the start of the definition file.
+func (d *Def) Location() protocol.Location {
+	return protocol.Location{URI: d.Doc.URI}
+}
+
+type cached struct {
+	def     *Def
+	modTime time.Time
+}
+
+// Registry resolves uses: names. It is safe for concurrent use.
 type Registry struct {
-	mu sync.Mutex
+	embedded fs.FS
+	prefix   string
 
-	// embeddedFS is the embedded filesystem (e.g. melange's PipelinesFS).
-	embeddedFS fs.FS
-	// embeddedPrefix is the path prefix within embeddedFS (e.g. "pipelines").
-	embeddedPrefix string
+	extractOnce sync.Once
+	extractDir  string
 
-	// embeddedDiskDir is the on-disk path to the embedded pipelines in the Go
-	// module cache, used for go-to-definition on built-in pipelines.
-	embeddedDiskDir string
-
-	// cache stores parsed embedded pipelines by uses-name.
-	cache map[string]*PipelineInfo
+	mu    sync.Mutex
+	defs  map[string]cached  // by file path
+	lists map[string][]entry // by directory
 }
 
-// NewRegistry creates a registry backed by an embedded filesystem.
-// modulePath is the Go module path (e.g. "chainguard.dev/melange") used to
-// locate the pipelines on disk in the module cache for go-to-definition.
-func NewRegistry(embeddedFS fs.FS, prefix string) *Registry {
+type entry struct {
+	name, file string
+}
+
+// NewRegistry creates a registry whose built-ins come from embedded under
+// prefix (melange's build.PipelinesFS and "pipelines").
+func NewRegistry(embedded fs.FS, prefix string) *Registry {
 	return &Registry{
-		embeddedFS:      embeddedFS,
-		embeddedPrefix:  prefix,
-		embeddedDiskDir: findEmbeddedDiskDir(),
-		cache:           make(map[string]*PipelineInfo),
+		embedded: embedded,
+		prefix:   prefix,
+		defs:     map[string]cached{},
+		lists:    map[string][]entry{},
 	}
 }
 
-// findEmbeddedDiskDir uses runtime build info to locate the melange module's
-// pipelines directory in the Go module cache.
-func findEmbeddedDiskDir() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
+// Invalidate drops cached listings, e.g. after pipeline files change.
+// Parsed definitions are revalidated by modification time anyway.
+func (r *Registry) Invalidate() {
+	r.mu.Lock()
+	r.lists = map[string][]entry{}
+	r.mu.Unlock()
+}
+
+// Search returns dirs followed by melange's own fallbacks, in the order
+// melange searches them.
+func Search(dirs []string) []string {
+	out := append([]string(nil), dirs...)
+	if fi, err := os.Stat(BuiltinDir); err == nil && fi.IsDir() {
+		out = append(out, BuiltinDir)
 	}
-	for _, dep := range info.Deps {
-		if dep.Path == "chainguard.dev/melange" {
-			gopath := os.Getenv("GOPATH")
-			if gopath == "" {
-				home, err := os.UserHomeDir()
-				if err != nil {
-					return ""
-				}
-				gopath = filepath.Join(home, "go")
+	return out
+}
+
+// Resolve finds the pipeline for a uses: name, searching dirs first and the
+// built-ins last, like melange. It returns nil if there is none.
+func (r *Registry) Resolve(uses string, dirs []string) *Def {
+	if !validUses(uses) {
+		return nil
+	}
+	for _, dir := range Search(dirs) {
+		file := filepath.Join(dir, filepath.FromSlash(uses)+".yaml")
+		if def := r.load(uses, dir, file, false); def != nil {
+			return def
+		}
+	}
+	dir := r.builtinDir()
+	if dir == "" {
+		return nil
+	}
+	return r.load(uses, dir, filepath.Join(dir, filepath.FromSlash(uses)+".yaml"), true)
+}
+
+// validUses mirrors melange's rejection of absolute and parent paths.
+func validUses(uses string) bool {
+	return uses != "" && !strings.HasPrefix(uses, "/") && !strings.Contains(uses, "..") && !strings.Contains(uses, "${{")
+}
+
+func (r *Registry) load(uses, dir, file string, builtin bool) *Def {
+	fi, err := os.Stat(file)
+	if err != nil || fi.IsDir() {
+		return nil
+	}
+	r.mu.Lock()
+	c, ok := r.defs[file]
+	r.mu.Unlock()
+	if ok && c.modTime.Equal(fi.ModTime()) {
+		return c.def
+	}
+
+	data, err := os.ReadFile(file) // #nosec G304 -- pipeline files the user asked for
+	if err != nil {
+		return nil
+	}
+	doc := document.New(document.URI(file), 0, string(data))
+	// Pipeline files are pipelines by definition, whatever they contain.
+	doc.Kind = document.KindPipeline
+	def := &Def{
+		Name:    uses,
+		File:    file,
+		Dir:     dir,
+		Builtin: builtin,
+		Doc:     doc,
+		Model:   model.Build(doc),
+	}
+	if doc.Root != nil {
+		if t := document.MapValue(doc.Root, "name"); t != nil {
+			def.Title = t.Value
+		}
+		for _, p := range document.Items(document.MapValue(document.MapValue(doc.Root, "needs"), "packages")) {
+			def.Needs = append(def.Needs, p.Value)
+		}
+	}
+
+	r.mu.Lock()
+	r.defs[file] = cached{def: def, modTime: fi.ModTime()}
+	r.mu.Unlock()
+	return def
+}
+
+// List returns every pipeline visible from dirs, first match per name, in
+// melange's search order, sorted by name.
+func (r *Registry) List(dirs []string) []*Def {
+	seen := map[string]bool{}
+	var out []*Def
+	add := func(dir string, builtin bool) {
+		for _, e := range r.listDir(dir) {
+			if seen[e.name] {
+				continue
 			}
-			dir := filepath.Join(gopath, "pkg", "mod", dep.Path+"@"+dep.Version, "pkg", "build", "pipelines")
-			if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-				return dir
+			seen[e.name] = true
+			if def := r.load(e.name, dir, e.file, builtin); def != nil {
+				out = append(out, def)
 			}
 		}
 	}
-	return ""
+	for _, dir := range Search(dirs) {
+		add(dir, false)
+	}
+	if dir := r.builtinDir(); dir != "" {
+		add(dir, true)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
-// ResolvePipelinePath returns the absolute filesystem path for a pipeline YAML
-// file. It searches the given dirs first, then falls back to the embedded
-// pipelines' location in the Go module cache (for go-to-definition on built-ins).
-func (r *Registry) ResolvePipelinePath(name string, dirs []string) (string, error) {
-	filename := name + ".yaml"
-	for _, dir := range dirs {
-		path := filepath.Join(dir, filename)
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-	}
-	// Fallback: check the Go module cache for embedded pipelines
-	if r.embeddedDiskDir != "" {
-		path := filepath.Join(r.embeddedDiskDir, filename)
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("pipeline %q not found on disk", name)
-}
-
-// LoadPipeline finds and parses a pipeline by its uses-name (e.g. "go/build").
-// It searches the given dirs first, then falls back to the embedded FS.
-func (r *Registry) LoadPipeline(name string, dirs []string) (*PipelineInfo, error) {
-	// Try on-disk dirs first (not cached — scoped per request)
-	filename := name + ".yaml"
-	for _, dir := range dirs {
-		path := filepath.Join(dir, filename)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var info PipelineInfo
-		if err := yaml.Unmarshal(data, &info); err != nil {
-			return nil, fmt.Errorf("parsing pipeline %s: %w", path, err)
-		}
-		info.Raw = string(data)
-		return &info, nil
-	}
-
-	// Fallback: embedded FS (cached)
-	if r.embeddedFS != nil {
-		r.mu.Lock()
-		if info, ok := r.cache[name]; ok {
-			r.mu.Unlock()
-			return info, nil
-		}
+func (r *Registry) listDir(dir string) []entry {
+	r.mu.Lock()
+	if es, ok := r.lists[dir]; ok {
 		r.mu.Unlock()
-
-		embeddedPath := r.embeddedPrefix + "/" + name + ".yaml"
-		data, err := fs.ReadFile(r.embeddedFS, embeddedPath)
-		if err == nil {
-			var info PipelineInfo
-			if err := yaml.Unmarshal(data, &info); err != nil {
-				return nil, fmt.Errorf("parsing embedded pipeline %s: %w", name, err)
-			}
-			info.Raw = string(data)
-			r.mu.Lock()
-			r.cache[name] = &info
-			r.mu.Unlock()
-			return &info, nil
-		}
+		return es
 	}
+	r.mu.Unlock()
 
-	return nil, fmt.Errorf("pipeline %q not found", name)
+	var es []entry
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".yaml") {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return nil
+		}
+		es = append(es, entry{name: filepath.ToSlash(strings.TrimSuffix(rel, ".yaml")), file: p})
+		return nil
+	})
+
+	r.mu.Lock()
+	r.lists[dir] = es
+	r.mu.Unlock()
+	return es
 }
 
-// ListPipelines returns pipeline uses-names from the given dirs and the
-// embedded FS combined.
-func (r *Registry) ListPipelines(dirs []string) []string {
-	seen := make(map[string]bool)
-	var names []string
-
-	for _, dir := range dirs {
-		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+// builtinDir extracts the embedded pipelines once per process into the user
+// cache directory and returns that directory.
+func (r *Registry) builtinDir() string {
+	r.extractOnce.Do(func() {
+		if r.embedded == nil {
+			return
+		}
+		base, err := os.UserCacheDir()
+		if err != nil {
+			base = os.TempDir()
+		}
+		dir := filepath.Join(base, "melange-lsp", "pipelines-"+melangeVersion())
+		err = fs.WalkDir(r.embedded, r.prefix, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".yaml") {
+				return err
+			}
+			data, err := fs.ReadFile(r.embedded, p)
 			if err != nil {
+				return err
+			}
+			rel := strings.TrimPrefix(p, r.prefix+"/")
+			dst := filepath.Join(dir, filepath.FromSlash(rel))
+			if old, err := os.ReadFile(dst); err == nil && bytes.Equal(old, data) {
 				return nil
 			}
-			if info.IsDir() || !strings.HasSuffix(info.Name(), ".yaml") {
-				return nil
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
 			}
-			rel, err := filepath.Rel(dir, path)
-			if err != nil {
-				return nil
-			}
-			name := strings.TrimSuffix(rel, ".yaml")
-			if !seen[name] {
-				seen[name] = true
-				names = append(names, name)
-			}
-			return nil
+			return os.WriteFile(dst, data, 0o444)
 		})
 		if err != nil {
-			continue
+			log.Printf("melange-lsp: extracting built-in pipelines: %v", err)
+			return
+		}
+		r.extractDir = dir
+	})
+	return r.extractDir
+}
+
+func melangeVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "chainguard.dev/melange" {
+				if dep.Replace != nil {
+					return "replaced"
+				}
+				return dep.Version
+			}
+		}
+	}
+	return "unknown"
+}
+
+var pipelineDirFlag = regexp.MustCompile(`--pipeline-dirs?[= ]+([^\s"'\\]+)`)
+
+// DiscoverDirs finds the pipeline directories used to build the file at
+// path. It reads --pipeline-dir(s) flags from the nearest Makefile, which
+// is how stereo and wolfi-dev/os configure melange; failing that it uses
+// pipelines/ directories next to the file and in its ancestors. root
+// bounds the search.
+func DiscoverDirs(file, root string) []string {
+	if file == "" {
+		return nil
+	}
+	dir := filepath.Dir(file)
+	stop := stopDir(dir, root)
+
+	for d := dir; ; d = filepath.Dir(d) {
+		if dirs := makefileDirs(filepath.Join(d, "Makefile")); len(dirs) > 0 {
+			return dirs
+		}
+		if d == stop || filepath.Dir(d) == d {
+			break
 		}
 	}
 
-	if r.embeddedFS != nil {
-		fs.WalkDir(r.embeddedFS, r.embeddedPrefix, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".yaml") {
-				return nil
-			}
-			rel, err := filepath.Rel(r.embeddedPrefix, path)
-			if err != nil {
-				return nil
-			}
-			name := strings.TrimSuffix(rel, ".yaml")
-			if !seen[name] {
-				seen[name] = true
-				names = append(names, name)
-			}
-			return nil
-		})
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		if !seen[d] && isDir(d) {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
 	}
-
-	return names
+	for d := dir; ; d = filepath.Dir(d) {
+		// A file inside a pipelines tree resolves uses: from its root.
+		if path.Base(filepath.ToSlash(d)) == "pipelines" {
+			add(d)
+		}
+		add(filepath.Join(d, "pipelines"))
+		if d == stop || filepath.Dir(d) == d {
+			break
+		}
+	}
+	return dirs
 }
+
+// stopDir is root if dir is inside it, else the nearest ancestor holding
+// .git, else dir itself.
+func stopDir(dir, root string) string {
+	if root != "" {
+		if rel, err := filepath.Rel(root, dir); err == nil && !strings.HasPrefix(rel, "..") {
+			return root
+		}
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		if isDir(filepath.Join(d, ".git")) || isFile(filepath.Join(d, ".git")) {
+			return d
+		}
+		if filepath.Dir(d) == d {
+			return dir
+		}
+	}
+}
+
+func makefileDirs(makefile string) []string {
+	data, err := os.ReadFile(makefile) // #nosec G304
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	for _, m := range pipelineDirFlag.FindAllStringSubmatch(string(data), -1) {
+		d := m[1]
+		if strings.Contains(d, "$") {
+			continue
+		}
+		if !filepath.IsAbs(d) {
+			d = filepath.Join(filepath.Dir(makefile), d)
+		}
+		d = filepath.Clean(d)
+		if !seen[d] && isDir(d) {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
+}
+
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+func isFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
+// Uses reports the uses: names referenced inside a pipeline definition.
+func (d *Def) Uses() []string {
+	var out []string
+	for _, s := range d.Model.Steps {
+		if s.Uses != nil {
+			out = append(out, s.Uses.Value)
+		}
+	}
+	return out
+}
+
+// Summary is the first line of the pipeline's title, for completion lists.
+func (d *Def) Summary() string {
+	if d.Title != "" {
+		return strings.TrimSpace(strings.SplitN(d.Title, "\n", 2)[0])
+	}
+	return d.Name
+}
+
+// decodeStrict is used for pipeline file diagnostics.
+func decodeStrict(text string, out any) error {
+	dec := yaml.NewDecoder(strings.NewReader(text))
+	dec.KnownFields(true)
+	return dec.Decode(out)
+}
+
+// DecodeStrict decodes a pipeline file rejecting unknown fields. melange
+// itself ignores unknown fields in pipeline files, so callers report
+// these as warnings.
+func DecodeStrict(text string, out any) error { return decodeStrict(text, out) }

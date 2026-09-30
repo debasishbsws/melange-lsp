@@ -1,0 +1,15 @@
+{
+  "name": "melange-lsp",
+  "displayName": "melange language server",
+  "version": "0.2.0",
+  "description": "Diagnostics, navigation and workspace references for melange package and pipeline YAML. Non-melange YAML is ignored by the server.",
+  "author": { "name": "Debasish Biswas" },
+  "license": "Apache-2.0",
+  "lspServers": {
+    "melange": {
+      "command": "melange-lsp",
+      "extensionToLanguage": { ".yaml": "yaml" },
+      "diagnostics": true
+    }
+  }
+}

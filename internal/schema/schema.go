@@ -1,292 +1,363 @@
+// Package schema answers questions about melange's configuration schema:
+// which keys are valid at a path, their types, and their documentation. It
+// reads the JSON Schema melange generates from its Go types
+// (config.SchemaJSON) and corrects the places where that schema disagrees
+// with how melange actually decodes YAML.
 package schema
 
 import (
-	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"unicode"
+
+	"chainguard.dev/melange/pkg/config"
 )
 
-//go:embed schema.json
-var schemaJSON []byte
-
-// CompletionItem represents a completion suggestion.
-type CompletionItem struct {
-	Label       string
+// Field is one key of a schema object.
+type Field struct {
+	// Name is the YAML key.
+	Name        string
 	Description string
-	Required    bool
+	// Type is "object", "array", "map", "string", "integer", "boolean",
+	// or "" when unknown.
+	Type string
+	// Def is the schema definition of an object value or of array items.
+	Def string
+	// ItemType is the element type of arrays of scalars.
+	ItemType string
+	// Enum lists the allowed scalar values, if fixed.
+	Enum     []string
+	Required bool
+	// Deprecated is set for deprecated fields: the replacement key, or
+	// "-" when there is none.
+	Deprecated string
+	// Line is the zero-based line of the property in schema.json.
+	Line int
 }
 
-// jsonSchema represents the top-level JSON Schema structure.
-type jsonSchema struct {
-	Defs map[string]jsonSchemaDef `json:"$defs"`
+// IsContainer reports whether the value is written on following lines.
+func (f Field) IsContainer() bool {
+	return f.Type == "object" || f.Type == "array" || f.Type == "map"
 }
 
-// jsonSchemaDef represents a single type definition in the schema.
-type jsonSchemaDef struct {
-	Properties map[string]jsonSchemaProperty `json:"properties"`
-	Required   []string                      `json:"required"`
+type rawDef struct {
+	Properties           map[string]rawProp `json:"properties"`
+	AdditionalProperties json.RawMessage    `json:"additionalProperties"`
+	Description          string             `json:"description"`
 }
 
-// jsonSchemaProperty represents a property within a type definition.
-type jsonSchemaProperty struct {
-	Ref         string             `json:"$ref"`
-	Description string             `json:"description"`
-	Type        string             `json:"type"`
-	Items       *jsonSchemaItemRef `json:"items"`
-}
-
-// jsonSchemaItemRef represents the items field for array types.
-type jsonSchemaItemRef struct {
-	Ref string `json:"$ref"`
-}
-
-var parsed jsonSchema
-
-// lineIndex maps "DefinitionName.propertyName" to a 0-based line number in schema.json.
-var lineIndex map[string]int
-
-func init() {
-	if err := json.Unmarshal(schemaJSON, &parsed); err != nil {
-		panic("schema: failed to parse embedded schema.json: " + err.Error())
-	}
-	lineIndex = buildLineIndex()
-}
-
-// buildLineIndex scans the raw schema.json text to map each property to its
-// line number. It looks for patterns like `"propName": {` within `"DefName": {`
-// → `"properties": {` blocks.
-func buildLineIndex() map[string]int {
-	idx := make(map[string]int)
-	lines := strings.Split(string(schemaJSON), "\n")
-
-	var currentDef string
-	inProperties := false
-	braceDepth := 0
-
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Track definition names: top-level keys inside $defs
-		// Pattern: "DefinitionName": {
-		if currentDef == "" && strings.HasSuffix(trimmed, ": {") {
-			name := strings.Trim(strings.TrimSuffix(trimmed, ": {"), "\"")
-			if name != "$schema" && name != "$id" && name != "$ref" && name != "$defs" {
-				currentDef = name
-				braceDepth = 1
-				inProperties = false
-				continue
-			}
-		}
-
-		if currentDef == "" {
-			continue
-		}
-
-		// Count braces to know when we leave the definition
-		for _, ch := range trimmed {
-			if ch == '{' {
-				braceDepth++
-			} else if ch == '}' {
-				braceDepth--
-			}
-		}
-
-		if braceDepth <= 0 {
-			currentDef = ""
-			inProperties = false
-			continue
-		}
-
-		// Detect "properties": {
-		if !inProperties && (trimmed == "\"properties\": {") {
-			inProperties = true
-			continue
-		}
-
-		// Inside properties, look for property keys at the right depth
-		if inProperties && braceDepth == 3 {
-			// Pattern: "propertyName": { or "propertyName": "..."
-			if colonIdx := strings.Index(trimmed, "\": "); colonIdx > 0 && strings.HasPrefix(trimmed, "\"") {
-				propName := trimmed[1:colonIdx]
-				idx[currentDef+"."+propName] = i
-			}
-		}
-	}
-
-	return idx
+type rawProp struct {
+	Ref                  string          `json:"$ref"`
+	Type                 string          `json:"type"`
+	Description          string          `json:"description"`
+	Items                *rawProp        `json:"items"`
+	Enum                 []string        `json:"enum"`
+	AdditionalProperties json.RawMessage `json:"additionalProperties"`
 }
 
 var (
-	schemaFileOnce sync.Once
-	schemaFilePath string
+	schemaJSON = config.SchemaJSON
+
+	loadOnce sync.Once
+	defs     map[string]map[string]Field
+	defDocs  map[string]string
 )
 
-// SchemaFilePath returns the on-disk path to schema.json, writing the embedded
-// content to a cache directory if needed. This allows go-to-definition to open
-// the file in the editor.
-func SchemaFilePath() string {
-	schemaFileOnce.Do(func() {
-		dir := filepath.Join(os.TempDir(), "melange-lsp")
+// required are the keys melange rejects a file without. The generated
+// schema marks many optional fields required, so it is not used for this.
+var required = map[string][]string{
+	"Configuration": {"package"},
+	"Package":       {"name", "version", "epoch"},
+	"Subpackage":    {"name"},
+	"VarTransforms": {"from", "match", "replace", "to"},
+	"RangeData":     {"name", "items"},
+	"Copyright":     {"license"},
+	"Schedule":      {"period"},
+}
+
+// enums the schema does not declare.
+var enums = map[string][]string{
+	"Schedule.period": {"daily", "weekly", "monthly"},
+	"CPE.part":        {"a", "o"},
+}
+
+// typeFixes corrects types the schema gets wrong for YAML.
+var typeFixes = map[string]string{
+	// time.Duration: written as "1h30m" in YAML.
+	"Package.timeout": "string",
+}
+
+// extraDocs adds melange conventions the Go comments do not state.
+var extraDocs = map[string]string{
+	"Package.epoch":        "Increment by one for every change that does not change `version`, so the new build is published. Reset to `0` when `version` changes.",
+	"Package.version":      "The upstream version. Changing it means `epoch` should be reset to `0`.",
+	"Subpackage.range":     "Name of a `data:` set. The subpackage is repeated once per item, with `${{range.key}}` and `${{range.value}}` substituted (written without spaces).",
+	"Configuration.data":   "Named sets of key/value items that `range:` subpackages iterate over.",
+	"Pipeline.uses":        "A reusable pipeline, looked up in the pipeline directories and then melange's built-ins. Its inputs are set with `with:`.",
+	"Pipeline.with":        "Inputs for the `uses:` pipeline. Unknown inputs are an error; required inputs without a default must be set.",
+	"Pipeline.if":          "Condition deciding whether the step runs, e.g. `${{build.arch}} == 'x86_64'`. Supports `==`, `!=`, `&&`, `||` and parentheses; `&&` and `||` have equal precedence and bind left to right.",
+	"Pipeline.environment": "Environment variables for this step and its children. Values only get `${{package.*}}` and `${{vars.*}}` substitution, written without spaces.",
+	"Checks.disabled":      "Linters to skip for this package. Unknown names fail the build.",
+}
+
+func load() {
+	var s struct {
+		Defs map[string]rawDef `json:"$defs"`
+	}
+	if err := json.Unmarshal(schemaJSON, &s); err != nil {
+		panic("schema: parsing melange schema.json: " + err.Error())
+	}
+	lines := propertyLines()
+
+	defs = map[string]map[string]Field{}
+	defDocs = map[string]string{}
+	for name, d := range s.Defs {
+		defDocs[name] = d.Description
+		req := map[string]bool{}
+		for _, r := range required[name] {
+			req[r] = true
+		}
+		fields := map[string]Field{}
+		for raw, p := range d.Properties {
+			key := yamlKey(raw, d.Properties)
+			f := Field{
+				Name:        key,
+				Description: p.Description,
+				Required:    req[key],
+				Line:        -1,
+			}
+			if l, ok := lines[name+"."+raw]; ok {
+				f.Line = l
+			}
+			switch {
+			case p.Ref != "":
+				f.Type, f.Def = "object", refName(p.Ref)
+			case p.Type == "array" && p.Items != nil:
+				f.Type = "array"
+				if p.Items.Ref != "" {
+					f.Def = refName(p.Items.Ref)
+				} else {
+					f.ItemType = p.Items.Type
+				}
+			case p.Type == "object" && len(p.AdditionalProperties) > 0:
+				f.Type = "map"
+				var ap rawProp
+				if json.Unmarshal(p.AdditionalProperties, &ap) == nil && ap.Ref != "" {
+					f.Def = refName(ap.Ref)
+				}
+			default:
+				f.Type = p.Type
+			}
+			f.Enum = p.Enum
+			if e, ok := enums[name+"."+key]; ok {
+				f.Enum = e
+			}
+			if t, ok := typeFixes[name+"."+key]; ok {
+				f.Type = t
+			}
+			if extra, ok := extraDocs[name+"."+key]; ok {
+				if f.Description != "" {
+					f.Description += "\n\n"
+				}
+				f.Description += extra
+			}
+			if m := deprecatedUse.FindStringSubmatch(f.Description); m != nil {
+				f.Deprecated = kebab(m[1])
+			} else if strings.Contains(f.Description, "Deprecated") {
+				f.Deprecated = "-"
+			}
+			f.Description = cleanDoc(f.Description)
+			fields[key] = f
+		}
+		defs[name] = fields
+	}
+}
+
+// yamlKey maps a schema property to its YAML key. Fields without JSON tags
+// appear capitalised in the schema (e.g. Needs.Packages) but yaml.v3
+// lowercases untagged field names.
+func yamlKey(raw string, props map[string]rawProp) string {
+	if raw == "" || !unicode.IsUpper(rune(raw[0])) {
+		return raw
+	}
+	return strings.ToLower(raw)
+}
+
+var (
+	optionalPrefix = regexp.MustCompile(`^(Optional|Required): `)
+	deprecatedUse  = regexp.MustCompile(`Deprecated: Use (\w+) instead`)
+)
+
+// kebab converts a Go field name to melange's YAML key style.
+func kebab(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				b.WriteByte('-')
+			}
+			r = unicode.ToLower(r)
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func cleanDoc(s string) string {
+	return optionalPrefix.ReplaceAllString(strings.TrimSpace(s), "")
+}
+
+func refName(ref string) string {
+	return strings.TrimPrefix(ref, "#/$defs/")
+}
+
+// propertyLines maps "Def.prop" to the zero-based line of prop in
+// schema.json, for go-to-definition.
+func propertyLines() map[string]int {
+	idx := map[string]int{}
+	lines := strings.Split(string(schemaJSON), "\n")
+	defLine := regexp.MustCompile(`^    "([A-Za-z]+)": \{`)
+	propLine := regexp.MustCompile(`^        "([^"]+)": \{`)
+	cur := ""
+	for i, l := range lines {
+		if m := defLine.FindStringSubmatch(l); m != nil {
+			cur = m[1]
+			continue
+		}
+		if m := propLine.FindStringSubmatch(l); m != nil && cur != "" {
+			idx[cur+"."+m[1]] = i
+		}
+	}
+	return idx
+}
+
+// Root definitions for the two kinds of melange file.
+const (
+	RootConfig   = "Configuration"
+	RootPipeline = "Pipeline"
+)
+
+// DefAt returns the definition whose keys are valid at path in a package
+// configuration. path holds mapping keys and "0" for sequence items.
+func DefAt(path []string) (string, bool) {
+	return DefAtFrom(RootConfig, path)
+}
+
+// DefAtFrom is DefAt starting from the given root definition.
+func DefAtFrom(root string, path []string) (string, bool) {
+	loadOnce.Do(load)
+	def := root
+	for i := 0; i < len(path); i++ {
+		seg := path[i]
+		if seg == "0" {
+			continue
+		}
+		f, ok := defs[def][seg]
+		if !ok || f.Def == "" {
+			return "", false
+		}
+		switch f.Type {
+		case "array":
+			// An array must be followed by an index to reach its items.
+			if i+1 >= len(path) || path[i+1] != "0" {
+				return "", false
+			}
+		case "map":
+			// The next segment is a map key, e.g. an input name.
+			if i+1 >= len(path) {
+				return "", false
+			}
+			i++
+		}
+		def = f.Def
+	}
+	return def, true
+}
+
+// Fields returns the keys valid at path in a package configuration.
+func Fields(path []string) []Field {
+	return FieldsFrom(RootConfig, path)
+}
+
+// FieldsFrom returns the keys valid at path from root, sorted by name.
+func FieldsFrom(root string, path []string) []Field {
+	def, ok := DefAtFrom(root, path)
+	if !ok {
+		return nil
+	}
+	return FieldsOf(def)
+}
+
+// FieldsOf returns the fields of a definition, sorted by name.
+func FieldsOf(def string) []Field {
+	loadOnce.Do(load)
+	var out []Field
+	for _, f := range defs[def] {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Lookup returns the field a configuration path ends at, e.g.
+// ["package", "epoch"], and the definition holding it.
+func Lookup(path []string) (Field, string, bool) {
+	return LookupFrom(RootConfig, path)
+}
+
+// LookupFrom is Lookup starting from root.
+func LookupFrom(root string, path []string) (Field, string, bool) {
+	// Drop trailing indices: the field is the array itself.
+	for len(path) > 0 && path[len(path)-1] == "0" {
+		path = path[:len(path)-1]
+	}
+	if len(path) == 0 {
+		return Field{}, "", false
+	}
+	def, ok := DefAtFrom(root, path[:len(path)-1])
+	if !ok {
+		return Field{}, "", false
+	}
+	loadOnce.Do(load)
+	f, ok := defs[def][path[len(path)-1]]
+	return f, def, ok
+}
+
+// DefDoc is a definition's own description.
+func DefDoc(def string) string {
+	loadOnce.Do(load)
+	return cleanDoc(defDocs[def])
+}
+
+var (
+	fileOnce sync.Once
+	filePath string
+)
+
+// FilePath returns schema.json on disk, writing it to the user cache
+// directory on first use so editors can open it.
+func FilePath() string {
+	fileOnce.Do(func() {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			base = os.TempDir()
+		}
+		dir := filepath.Join(base, "melange-lsp")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return
 		}
 		p := filepath.Join(dir, "schema.json")
-		if err := os.WriteFile(p, schemaJSON, 0o644); err != nil {
-			return
+		if old, err := os.ReadFile(p); err != nil || string(old) != string(schemaJSON) {
+			if err := os.WriteFile(p, schemaJSON, 0o644); err != nil {
+				return
+			}
 		}
-		schemaFilePath = p
+		filePath = p
 	})
-	return schemaFilePath
-}
-
-// FindPropertyLine resolves a YAML path and key name to a 0-based line number
-// in schema.json. Returns -1 if the property cannot be found.
-func FindPropertyLine(path []string, key string) int {
-	// Resolve the path to a definition name.
-	defName := resolvePathToDefinition(path)
-	if defName == "" {
-		return -1
-	}
-
-	line, ok := lineIndex[defName+"."+key]
-	if !ok {
-		return -1
-	}
-	return line
-}
-
-// resolvePathToDefinition walks the YAML path and returns the schema definition
-// name that contains the properties at that level.
-func resolvePathToDefinition(path []string) string {
-	defName := "Configuration"
-	def, ok := parsed.Defs[defName]
-	if !ok {
-		return ""
-	}
-
-	for _, segment := range path {
-		if isNumeric(segment) {
-			continue
-		}
-
-		prop, ok := def.Properties[segment]
-		if !ok {
-			return ""
-		}
-
-		var targetDef string
-		if prop.Ref != "" {
-			targetDef = resolveRef(prop.Ref)
-		} else if prop.Type == "array" && prop.Items != nil && prop.Items.Ref != "" {
-			targetDef = resolveRef(prop.Items.Ref)
-		} else {
-			return ""
-		}
-
-		if targetDef == "" {
-			return ""
-		}
-
-		next, ok := parsed.Defs[targetDef]
-		if !ok {
-			return ""
-		}
-		defName = targetDef
-		def = next
-	}
-
-	return defName
-}
-
-// resolveRef extracts the definition name from a $ref like "#/$defs/Package".
-func resolveRef(ref string) string {
-	const prefix = "#/$defs/"
-	if strings.HasPrefix(ref, prefix) {
-		return ref[len(prefix):]
-	}
-	return ""
-}
-
-// isNumeric reports whether s consists entirely of digits.
-func isNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// GetCompletionsForPath returns completions for a given YAML path.
-// Path is a list of keys from root, e.g., ["package"] or ["pipeline", "0"].
-func GetCompletionsForPath(path []string) []CompletionItem {
-	def, ok := parsed.Defs["Configuration"]
-	if !ok {
-		return nil
-	}
-
-	// Walk the path to resolve to the target definition.
-	for i := 0; i < len(path); i++ {
-		segment := path[i]
-
-		// Skip numeric indices — they were already handled when we
-		// resolved the array's items ref in the previous iteration.
-		if isNumeric(segment) {
-			continue
-		}
-
-		prop, ok := def.Properties[segment]
-		if !ok {
-			return nil
-		}
-
-		// Determine the target definition name.
-		var targetDef string
-
-		if prop.Ref != "" {
-			// Direct $ref (e.g., "package" → "#/$defs/Package")
-			targetDef = resolveRef(prop.Ref)
-		} else if prop.Type == "array" && prop.Items != nil && prop.Items.Ref != "" {
-			// Array with $ref items (e.g., "pipeline" → items.$ref)
-			targetDef = resolveRef(prop.Items.Ref)
-		} else {
-			return nil
-		}
-
-		if targetDef == "" {
-			return nil
-		}
-
-		next, ok := parsed.Defs[targetDef]
-		if !ok {
-			return nil
-		}
-		def = next
-	}
-
-	return defToCompletions(def)
-}
-
-// defToCompletions converts a schema definition's properties into CompletionItems.
-func defToCompletions(def jsonSchemaDef) []CompletionItem {
-	requiredSet := make(map[string]bool, len(def.Required))
-	for _, r := range def.Required {
-		requiredSet[r] = true
-	}
-
-	items := make([]CompletionItem, 0, len(def.Properties))
-	for name, prop := range def.Properties {
-		items = append(items, CompletionItem{
-			Label:       name,
-			Description: prop.Description,
-			Required:    requiredSet[name],
-		})
-	}
-	return items
+	return filePath
 }

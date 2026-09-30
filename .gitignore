@@ -1,5 +1,5 @@
 # Binaries
-melange-lsp
+/melange-lsp
 *.exe
 *.exe~
 *.dll

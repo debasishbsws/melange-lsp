@@ -1,16 +1,27 @@
+version: "2"
 linters:
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
   enable:
-    - errcheck
     - gofmt
     - goimports
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-
-linters-settings:
-  goimports:
-    local-prefixes: melange-lsp
-
-run:
-  timeout: 5m
+  settings:
+    goimports:
+      local-prefixes:
+        - melange-lsp
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
